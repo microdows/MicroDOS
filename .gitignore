@@ -1,0 +1,5 @@
+# Fichiers compilés par NASM
+*.bin
+
+# Images disquette
+*.img
