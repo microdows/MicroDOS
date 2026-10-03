@@ -7,7 +7,7 @@
 	OEMName		db"MicroDOS"
 	BytesPerSector dw 512
 	SectorsPerClust db 1
-	ReservedSectors dw 5
+	ReservedSectors dw 1
 	NumFATs		db 2
 	RootEntries dw 224
 	TotalSectors16 dw 2880
@@ -42,10 +42,10 @@ start:
 	xor bx, bx
 
 	mov ah, 0x02
-	mov al, 4
+	mov al, 3
 	mov ch, 0
-	mov cl, 2
-	mov dh, 0
+	mov cl, 16
+	mov dh, 1
 	mov dl, 0
 	int 0x13
 	jc error
