@@ -1,7 +1,31 @@
 [BITS 16]
 [ORG 0x7C00]
 
+	jmp short start
+	nop
+
+	OEMName		db"MicroDOS"
+	BytesPerSector dw 512
+	SectorsPerClust db 1
+	ReservedSectors dw 5
+	NumFATs		db 2
+	RootEntries dw 224
+	TotalSectors16 dw 2880
+	MediaDescriptor db 0xF0
+	SectorsPerFAT dw 9
+	SectorsPerTrack dw 18
+	NumHeads dw 2
+	HiddenSectors dd 0
+	TotalSectors32 dd 0
+	DriveNumber db 0
+	Reserved1 db 0
+	BootSignature db 0x29
+	VolumeID dd 0x12345678
+	VolumeLabel db 'MICRODOS   '
+	FileSystem db 'FAT12   '
+
 start:
+
 	cli
 	xor ax, ax
 	mov ds, ax
@@ -25,28 +49,28 @@ start:
 	mov dl, 0
 	int 0x13
 	jc error
-
 	jmp 0x1000:0000
 
-	error:
+error:
 	mov si, msg_error
 	call print
 	jmp $
 
+print:
 
-	print:
 	lodsb
 	or al, al
 	jz .done
 	mov ah, 0x0E
 	int 0x10
 	jmp print
-	.done:
-	ret
+.done:
+ret
 
-	msg	db 'Chargement de MicroDOS', 13, 10, 0
-	msg_error db 'Erreur de Chargement', 13, 10, 0
+msg db 'Chargement de MicroDOS...', 13, 10, 0
+msg_error db 'Erreur de Lecture!', 13, 10, 0
+
+times 510-($-$$) db 0
+dw 0xAA55
 
 
-	times 510-($-$$) db 0
-	dw 0xAA55
