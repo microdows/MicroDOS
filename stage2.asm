@@ -52,8 +52,8 @@ main_loop:
     call strcmp
     jc do_reboot
 
-    mov si, msg_unknow
-    call print
+    mov si, buffer
+    call do_exec
     jmp main_loop
 
 do_help:
@@ -373,6 +373,113 @@ print:
 .done:
     ret
 
+; ---------- Exécution d'un .COM ---------
+do_exec:
+
+	push ds
+	push es
+
+	mov si, buffer
+	call build_com_name
+	call find_file
+	jc .not_found
+
+	mov ax, [si + 26]
+	mov bx, [si + 28]
+	mov [file_size], bx
+
+	add ax, 31
+	call lba_to_chs
+
+	mov ax, 0x2000
+	mov es, ax
+	mov bx, 0x100
+	mov ah, 0x02
+	mov al, 1
+	int 0x13
+	jc .read_err
+
+	push cs
+	push .ret_from_com
+
+	mov ax, 0x2000
+	mov ds, ax
+	mov es, ax
+	jmp 0x2000:0x100
+
+.ret_from_com:
+
+	pop es
+	pop ds
+	ret
+
+.not_found:
+
+	mov si, msg_unknow
+	call print
+	pop es
+	pop ds
+	ret
+
+.read_err:
+
+	mov si, msg_dir_err
+	call print
+	pop es
+	pop ds
+	ret
+
+; --------Convertit "Hello" en "HELLO COM"------------
+
+build_com_name:
+
+	push si
+	push di
+	mov di, fatname
+
+	mov cx, 8
+
+.copy_name:
+
+	mov al, [si]
+	cmp al, 0
+	je .pad_name
+	cmp al, ' '
+	je .pad_name
+	cmp al, 'a'
+	jb .not_lower
+	cmp al, 'z'
+	ja .not_lower
+	sub al, 32
+
+.not_lower:
+
+	mov [di], al
+	inc di
+	inc si
+	dec cx
+	jnz .copy_name
+	jmp .add_com
+
+.pad_name:
+
+	test cx, cx
+	jz .add_com
+	mov byte [di], ' '
+	inc di
+	dec cx
+	jmp .pad_name
+
+.add_com:
+
+	mov byte [di], 'C'
+	mov byte [di+1], 'O'
+	mov byte [di+2], 'M'
+
+	pop di
+	pop si
+	ret
+
 ; ---------- Lecture clavier ----------
 read_line:
     mov cx, 0
@@ -455,19 +562,20 @@ push di
 	ret
 
 ; ---------- Donnees ----------
-msg_welcome  db 'MicroDOS v0.4 - Shell', 13, 10
+msg_welcome  db 'MicroDOS v0.5 - Shell', 13, 10
              db 'tapez "help" pour la liste de commandes.', 13, 10, 10, 0
 msg_prompt   db '> ', 0
 msg_help     db 'Liste des Commandes', 13, 10
              db ' help - cette aide', 13, 10
              db ' dir - liste les fichiers', 13, 10
              db ' type - affiche un fichier', 13, 10
+	     db '<programme> - execute un fichier .COM', 13, 10
              db ' cls - efface l ecran', 13, 10
              db ' ver - version', 13, 10
              db ' reboot - redemarre le PC', 13, 10
              db ' rebootdos - redemarre MicroDOS', 13, 10, 13, 10, 0
 msg_unknow   db 'Commande inconnue. Tapez "help".', 13, 10, 0
-msg_ver      db 'MicroDOS v0.4', 13, 10, 0
+msg_ver      db 'MicroDOS v0.5', 13, 10, 0
 msg_reboot   db 'Redemarrage en cours...', 13, 10, 0
 msg_rebootdos db 'Redemarrage de MicroDOS...', 13, 10, 0
 msg_dir_err  db 'Erreur lecture disque.', 13, 10, 0
