@@ -7,6 +7,15 @@ start:
     push cs
     pop es
 
+	cli
+	push es
+	xor ax, ax
+	mov es, ax
+	mov word [es:0x84], int21_handler
+	mov word [es:0x86], cs
+	pop es
+	sti
+
     mov si, msg_welcome
     call print
 
@@ -41,6 +50,11 @@ main_loop:
     mov di, cmd_cls
     call strcmp
     jc do_cls
+
+    mov si, buffer
+	mov di, cmd_reset
+	call strcmp
+	jc do_reset
 
     mov si, buffer
     mov di, cmd_rebootdos
@@ -83,6 +97,14 @@ do_rebootdos:
     call print
     int 0x19
     jmp main_loop
+
+do_reset:
+	mov ah, 0x00
+	mov dl, 0
+	int 0x13
+	mov si, msg_reset
+	call print
+	jmp main_loop
 
 ; ---------- DIR ----------
 do_dir:
@@ -561,8 +583,137 @@ push di
 	clc
 	ret
 
+; ----------------Handler INT 21 (API DOS)------------------------------
+int21_handler:
+
+	sti
+	push ax
+	push bx
+	push cx
+	push si
+	push dx
+	push di
+	push ds
+	push es
+
+	cmp ah, 0x09
+	je .ah09
+	cmp ah, 0x02
+	je .ah02
+	cmp ah, 0x4C
+	je .ah4c
+	cmp ah, 0x30
+	je .ah30
+	cmp ah, 0x0B
+	je .ah0b
+	cmp ah, 0x01
+	je .ah01
+	cmp ah, 0x08
+	je .ah08
+	cmp ah, 0x2C
+	je .ah2c
+	cmp ah, 0x00
+	je .ah00
+	cmp ah, 0x0F
+
+	jmp .done
+
+.ah09:
+
+	mov si, dx
+
+.loop09:
+
+	lodsb
+	cmp al, '$'
+	je .done
+	mov ah, 0x0E
+	int 0x10
+	jmp .loop09
+
+.ah02:
+
+	mov al,dl
+	mov ah, 0x0E
+	int 0x10
+	jmp .done
+
+.ah30:
+
+	mov al, 3
+	mov ah, 30
+	jmp .done
+
+.ah0b:
+
+	mov ah, 0x01
+	int 0x16
+	jz .nokey
+	mov al, 0xFF
+	jmp .done
+
+.nokey:
+
+	xor al, al
+	jmp .done
+
+.ah01:
+
+	mov ah, 0x00
+	int 0x16
+	mov ah, 0x0E
+	int 0x10
+	jmp .done
+
+.ah08:
+
+	mov ah, 0x00
+	int 0x16
+	jmp .done
+
+.ah2c:
+
+	mov ah, 0x02
+	int 0x1A
+	jmp .done
+
+.ah00:
+
+	jmp .ah4c
+
+.ah0f:
+
+	xor al, al
+	jmp .done
+
+.ah4c:
+
+	pop es
+	pop ds
+	pop di
+	pop dx
+	pop si
+	pop cx
+	pop bx
+	pop ax
+	add sp, 6
+	retf
+
+.done:
+
+	pop es
+	pop ds
+	pop di
+	pop dx
+	pop si
+	pop cx
+	pop bx
+	pop ax
+	iret
+
+
 ; ---------- Donnees ----------
-msg_welcome  db 'MicroDOS v0.5 - Shell', 13, 10
+msg_welcome  db 'MicroDOS v0.6 - Shell', 13, 10
              db 'tapez "help" pour la liste de commandes.', 13, 10, 10, 0
 msg_prompt   db '> ', 0
 msg_help     db 'Liste des Commandes', 13, 10
@@ -570,16 +721,18 @@ msg_help     db 'Liste des Commandes', 13, 10
              db ' dir - liste les fichiers', 13, 10
              db ' type - affiche un fichier', 13, 10
 	     db '<programme> - execute un fichier .COM', 13, 10
+	     db 'reset - reinitialise la disquette', 13, 10
              db ' cls - efface l ecran', 13, 10
              db ' ver - version', 13, 10
              db ' reboot - redemarre le PC', 13, 10
              db ' rebootdos - redemarre MicroDOS', 13, 10, 13, 10, 0
 msg_unknow   db 'Commande inconnue. Tapez "help".', 13, 10, 0
-msg_ver      db 'MicroDOS v0.5', 13, 10, 0
+msg_ver      db 'MicroDOS v0.6', 13, 10, 0
 msg_reboot   db 'Redemarrage en cours...', 13, 10, 0
 msg_rebootdos db 'Redemarrage de MicroDOS...', 13, 10, 0
 msg_dir_err  db 'Erreur lecture disque.', 13, 10, 0
 msg_not_found db 'Fichier non trouve.', 13, 10, 0
+msg_reset db 'Disque reinitialise', 13, 10, 0
 
 cmd_help     db 'help', 0
 cmd_dir      db 'dir', 0
@@ -588,6 +741,7 @@ cmd_cls      db 'cls', 0
 cmd_ver      db 'ver', 0
 cmd_reboot   db 'reboot', 0
 cmd_rebootdos db 'rebootdos', 0
+cmd_reset db 'reset', 0
 
 fatname      times 11 db 0
 file_size    dw 0
