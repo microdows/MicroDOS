@@ -57,6 +57,26 @@ main_loop:
 	jc do_reset
 
     mov si, buffer
+    mov di, cmd_echo
+    call strcmp
+    jc do_echo
+
+    mov si, buffer
+    mov di, cmd_pause
+    call strcmp
+    jc do_pause
+
+    mov si, buffer
+    mov di, cmd_date
+    call strcmp
+    jc do_date
+
+    mov si, buffer
+    mov di, cmd_time
+    call strcmp
+    jc do_time
+
+    mov si, buffer
     mov di, cmd_rebootdos
     call strcmp
     jc do_rebootdos
@@ -105,6 +125,99 @@ do_reset:
 	mov si, msg_reset
 	call print
 	jmp main_loop
+
+do_echo:
+
+	mov si, buffer
+	add si, 4
+	cmp byte [si], ' '
+	jne .done
+	inc si
+
+.print:
+	lodsb
+	or al, al
+	jz .newline
+	mov ah, 0x0E
+	int 0x10
+	jmp .print
+
+.newline:
+
+.done:
+
+	mov ah, 0x0E
+	mov al, 13
+	int 0x10
+	mov al, 10
+	int 0x10
+	jmp main_loop
+
+do_pause:
+
+	mov si, msg_pause
+	call print
+	mov ah, 0x00
+	int 0x16
+	jmp main_loop
+
+do_date:
+
+	mov ah, 0x04
+	int 0x1A
+	; CH=siécle BCD, CL=année BCD, DH=mois BCD, DL=jour BCD
+	mov si, msg_date_prefix
+	call print
+	mov al, dl
+	call print_bcd
+	mov al, '/'
+	mov ah, 0x0E
+	int 0x10
+	mov al, ch
+	call print_bcd
+	mov al, cl
+	call print_bcd
+	mov ah, 0x0E
+	mov al, 13
+	int 0x10
+	mov al, 10
+	int 0x10
+	jmp main_loop
+
+do_time:
+
+	mov ah, 0x02
+	int 0x1A
+	; CH=Heure BCD, CL, minutes BCD, DH=secondes BCD
+	mov si, msg_time_prefix
+	call print
+	mov al, ch
+	call print_bcd
+	mov al, ':'
+	mov ah, 0x0E
+	int 0x10
+	mov al, cl
+	call print_bcd
+	mov ah, 0x0E
+	mov al, 13
+	int 0x10
+	mov al, 10
+	int 0x10
+	jmp main_loop
+
+print_bcd:
+
+	push ax
+	shr al, 4
+	add al, '0'
+	mov ah, 0x0E
+	int 0x10
+	pop ax
+	and al, 0x0F
+	add al, '0'
+	mov ah, 0x0E
+	int 0x10
+	ret
 
 ; ---------- DIR ----------
 do_dir:
@@ -615,6 +728,11 @@ int21_handler:
 	cmp ah, 0x00
 	je .ah00
 	cmp ah, 0x0F
+	je .ah0f
+	cmp ah, 0x25
+	je .ah25
+	cmp ah, 0x35
+	je .ah35
 
 	jmp .done
 
@@ -686,6 +804,37 @@ int21_handler:
 	xor al, al
 	jmp .done
 
+.ah25:
+
+	push ds
+	push ax
+	xor ax, ax
+	pop ax
+	mov bl, al
+	xor bh, bh
+	shl bx, 1
+	shl bx, 1
+	mov [bx], dx
+	pop ax
+	mov [bx+2], ax
+	jmp .done
+
+.ah35:
+
+	push ds
+	mov bl, al
+	xor bh, bh
+	shl bx, 1
+	shl bx, 1
+	xor ax, ax
+	mov ds, ax
+	mov ax, [bx]
+	mov bx, [bx+2]
+	mov es, bx
+	mov bx, ax
+	pop ds
+	jmp .done
+
 .ah4c:
 
 	pop es
@@ -713,26 +862,33 @@ int21_handler:
 
 
 ; ---------- Donnees ----------
-msg_welcome  db 'MicroDOS v0.6 - Shell', 13, 10
+msg_welcome  db 'MicroDOS v0.7 - Shell', 13, 10
              db 'tapez "help" pour la liste de commandes.', 13, 10, 10, 0
 msg_prompt   db '> ', 0
 msg_help     db 'Liste des Commandes', 13, 10
              db ' help - cette aide', 13, 10
              db ' dir - liste les fichiers', 13, 10
              db ' type - affiche un fichier', 13, 10
-	     db '<programme> - execute un fichier .COM', 13, 10
-	     db 'reset - reinitialise la disquette', 13, 10
+             db ' <programme> - execute un fichier .COM', 13, 10
+             db ' reset - reinitialise la disquette', 13, 10
              db ' cls - efface l ecran', 13, 10
              db ' ver - version', 13, 10
              db ' reboot - redemarre le PC', 13, 10
-             db ' rebootdos - redemarre MicroDOS', 13, 10, 13, 10, 0
+             db ' rebootdos - redemarre MicroDOS', 13, 10
+             db ' echo <txt> - affiche un texte', 13, 10
+             db ' pause - attend une touche', 13, 10
+             db ' date - affiche la date', 13, 10
+             db ' time - affiche l heure', 13, 10, 0
 msg_unknow   db 'Commande inconnue. Tapez "help".', 13, 10, 0
-msg_ver      db 'MicroDOS v0.6', 13, 10, 0
+msg_ver      db 'MicroDOS v0.7', 13, 10, 0
 msg_reboot   db 'Redemarrage en cours...', 13, 10, 0
 msg_rebootdos db 'Redemarrage de MicroDOS...', 13, 10, 0
 msg_dir_err  db 'Erreur lecture disque.', 13, 10, 0
 msg_not_found db 'Fichier non trouve.', 13, 10, 0
 msg_reset db 'Disque reinitialise', 13, 10, 0
+msg_pause db 'Appuyez sur une touche...', 13, 10, 0
+msg_date_prefix db 'Date :', 0
+msg_time_prefix db 'Heure :', 0
 
 cmd_help     db 'help', 0
 cmd_dir      db 'dir', 0
@@ -742,6 +898,10 @@ cmd_ver      db 'ver', 0
 cmd_reboot   db 'reboot', 0
 cmd_rebootdos db 'rebootdos', 0
 cmd_reset db 'reset', 0
+cmd_echo db 'echo', 0
+cmd_pause db 'pause', 0
+cmd_date db  'date', 0
+cmd_time db 'time', 0
 
 fatname      times 11 db 0
 file_size    dw 0
