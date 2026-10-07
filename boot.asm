@@ -42,7 +42,7 @@ start:
 	xor bx, bx
 
 	mov ah, 0x02
-	mov al, 6
+	mov al, 7
 	mov ch, 0
 	mov cl, 16
 	mov dh, 1

@@ -82,6 +82,11 @@ main_loop:
     jc do_fatinfo
 
     mov si, buffer
+    mov di, cmd_mkfile
+    call strcmp
+    jc do_mkfile
+
+    mov si, buffer
     mov di, cmd_rebootdos
     call strcmp
     jc do_rebootdos
@@ -262,11 +267,34 @@ do_fatinfo:
 	mov al, 10
 	int 0x10
 	jmp main_loop
+
+do_mkfile:
+    mov si, buffer
+    add si, 7
+    cmp byte [si-1], ' '
+    jne .usage
+    call create_file
+    cmp ax, 0xFFFF
+    je .error
+    mov si, msg_mkfile_ok
+    call print
+    jmp main_loop
+
+.error:
+    mov si, msg_mkfile_err
+    call print
+    jmp main_loop
+
+.usage:
+    mov si, msg_mkfile_usage
+    call print
+    jmp main_loop
+
 ; ---------- DIR ----------
 do_dir:
     mov ax, 0x1000
     mov es, ax
-    mov bx, 0x0800
+    mov bx, 0x8000
     mov ah, 0x02
     mov al, 14
     mov ch, 0
@@ -276,7 +304,7 @@ do_dir:
     int 0x13
     jc .error
 
-    mov si, 0x0800
+    mov si, 0x8000
     mov bp, 224
 
 .loop:
@@ -360,13 +388,13 @@ do_type:
 
     mov ax, 0x1000
     mov es, ax
-    mov bx, 0x0A00
+    mov bx, 0xA000
     mov ah, 0x02
     mov al, 1
     int 0x13
     jc .read_err
 
-    mov si, 0x0A00
+    mov si, 0xA000
     mov cx, [file_size]
 .print:
     test cx, cx
@@ -463,7 +491,7 @@ build_fat_name:
 find_file:
     mov ax, 0x1000
     mov es, ax
-    mov bx, 0x0800
+    mov bx, 0x8000
     mov ah, 0x02
     mov al, 14
     mov ch, 0
@@ -473,7 +501,7 @@ find_file:
     int 0x13
     jc .err
 
-    mov di, 0x0800
+    mov di, 0x8000
     mov bp, 224
 
 .loop:
@@ -667,21 +695,20 @@ fat_set:
 	or ax, dx
 
 .write:
-
 	mov [si], ax
-
 	mov ax, 0x1000
 	mov es, ax
 	mov bx, 0x0C00
+	mov ch, 0
+	mov cl, 2
+	mov dh, 0
+	mov dl, 0
 	mov ah, 0x03
 	mov al, 1
-	mov dl, 0
 	int 0x13
 
 .error:
 
-	pop ax
-	pop dx
 	pop es
 	pop si
 	pop dx
@@ -719,6 +746,173 @@ fat_find_free:
 
 .done:
 
+	pop cx
+	pop bx
+	ret
+
+;------------------- Trouver une entrée libre ---------------------
+
+find_free_entry:
+
+	push ax
+	push bx
+	push cx
+	push dx
+	push es
+
+	mov ax, 0x1000
+	mov es, ax
+	mov bx, 0x8000
+	mov ah, 0x02
+	mov al, 14
+	mov ch, 0
+	mov cl, 2
+	mov dh, 1
+	mov dl, 0
+	int 0x13
+	jc .error
+
+	mov si, 0x8000
+	mov bp, 224
+
+.loop:
+
+	mov al, [si]
+	cmp al, 0
+	je .found
+	cmp al, 0xE5
+	je .found
+
+	add si, 32
+	dec bp
+	jnz .loop
+
+	stc
+	jmp .done
+
+.found:
+
+	clc
+	jmp .done
+
+.error:
+
+	stc
+
+.done:
+
+	pop es
+	pop dx
+	pop cx
+	pop bx
+	pop ax
+	ret
+
+;-------------------------- Ecrire une entrée ---------------------
+
+write_dir_entry:
+
+	push ax
+	push bx
+	push cx
+	push dx
+	push si
+	push di
+	push es
+
+	mov cx, 11
+
+.copy_name:
+
+	lodsb
+	stosb
+	loop .copy_name
+
+	xor al, al
+	stosb
+
+	mov cx, 10
+
+.reserved:
+
+	xor al, al
+	stosb
+	loop .reserved
+
+	xor ax, ax
+	stosw
+	stosw
+
+	mov ax, dx
+	stosw
+
+	mov ax, bx
+	stosw
+	xor ax, ax
+	stosw
+
+	mov ax, 0x1000
+	mov es, ax
+	mov bx, 0x8000
+	mov ah, 0x03
+	mov al, 14
+	mov ch, 0
+	mov cl, 2
+	mov dh, 1
+	mov dl, 0
+	int 0x13
+
+	pop es
+	pop di
+	pop si
+	pop dx
+	pop cx
+	pop bx
+	pop ax
+	ret
+
+create_file:
+
+	push bx
+	push cx
+	push dx
+	push si
+	push di
+
+	call build_fat_name
+
+	call fat_find_free
+	cmp ax, 0xFFFF
+	je .error
+	mov [cluster_temp], ax
+
+	mov dx, 0xFFF
+	call fat_set
+
+	call find_free_entry
+	jc .error
+	mov di, si
+	mov si, fatname
+	mov ax, [cluster_temp]
+	mov dx, ax
+	xor bx, bx
+	call write_dir_entry
+
+	mov ax, [cluster_temp]
+
+	pop di
+	pop si
+	pop dx
+	pop cx
+	pop bx
+	ret
+
+.error:
+
+	mov ax, 0xFFFF
+	pop di
+	pop si
+	pop dx
 	pop cx
 	pop bx
 	ret
@@ -959,6 +1153,8 @@ int21_handler:
 	je .ah25
 	cmp ah, 0x35
 	je .ah35
+	cmp ah, 0x3C
+	je .ah3c
 
 	jmp .done
 
@@ -1061,6 +1257,20 @@ int21_handler:
 	pop ds
 	jmp .done
 
+.ah3c:
+
+	mov si, dx
+	call create_file
+	cmp ax, 0xFFFF
+	je .error3c
+	clc
+	jmp .done
+
+.error3c:
+
+	stc
+	jmp .done
+
 .ah4c:
 
 	pop es
@@ -1104,7 +1314,8 @@ msg_help     db 'Liste des Commandes', 13, 10
              db ' echo <txt> - affiche un texte', 13, 10
              db ' pause - attend une touche', 13, 10
              db ' date - affiche la date', 13, 10
-             db ' time - affiche l heure', 13, 10, 0
+             db ' time - affiche l heure', 13, 10
+	     db ' mkfile <nom> - cree un fichier', 13, 10, 0
 msg_unknow   db 'Commande inconnue. Tapez "help".', 13, 10, 0
 msg_ver      db 'MicroDOS v0.8', 13, 10, 0
 msg_reboot   db 'Redemarrage en cours...', 13, 10, 0
@@ -1116,6 +1327,9 @@ msg_pause db 'Appuyez sur une touche...', 13, 10, 0
 msg_date_prefix db 'Date :', 0
 msg_time_prefix db 'Heure :', 0
 msg_fatinfo db 'Cluster libre : ', 0
+msg_mkfile_ok db 'Fichier cree', 13, 10, 0
+msg_mkfile_err db 'Erreur creation', 13, 10, 0
+msg_mkfile_usage db 'Usage : mkfile NOM.TXT', 13, 10, 0
 
 cmd_help     db 'help', 0
 cmd_dir      db 'dir', 0
@@ -1130,6 +1344,7 @@ cmd_pause db 'pause', 0
 cmd_date db  'date', 0
 cmd_time db 'time', 0
 cmd_fatinfo db 'fatinfo', 0
+cmd_mkfile db 'mkfile', 0
 
 fatname      times 11 db 0
 file_size    dw 0
