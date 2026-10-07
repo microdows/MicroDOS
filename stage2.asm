@@ -77,6 +77,11 @@ main_loop:
     jc do_time
 
     mov si, buffer
+    mov di, cmd_fatinfo
+    call strcmp
+    jc do_fatinfo
+
+    mov si, buffer
     mov di, cmd_rebootdos
     call strcmp
     jc do_rebootdos
@@ -219,6 +224,44 @@ print_bcd:
 	int 0x10
 	ret
 
+do_fatinfo:
+
+	call fat_find_free
+
+	push ax
+
+	mov si, msg_fatinfo
+	call print
+
+	pop ax
+
+	mov cx, 0
+	mov bx, 10
+
+.divide:
+
+	xor dx, dx
+	div bx
+	push dx
+	inc cx
+	test ax, ax
+	jnz .divide
+
+.print:
+
+	pop dx
+	mov al, dl
+	add al, '0'
+	mov ah, 0x0E
+	int 0x10
+	loop .print
+
+	mov ah, 0x0E
+	mov al, 13
+	int 0x10
+	mov al, 10
+	int 0x10
+	jmp main_loop
 ; ---------- DIR ----------
 do_dir:
     mov ax, 0x1000
@@ -496,6 +539,189 @@ lba_to_chs:
     pop bx
     pop ax
     ret
+
+;----------- FAT12 : lire une entrée --------------
+;Entree : AX = numero de cluster
+;Sortie AX = valeur de l'entrée FAT
+
+fat_get:
+
+	push bx
+	push cx
+	push dx
+	push si
+	push es
+
+	mov [cluster_temp], ax
+	mov bx, ax
+	mov ax, ax
+	shr ax, 1
+	add ax, bx
+	push ax
+
+	xor dx, dx
+	mov cx, 512
+	div cx
+	add ax, 1
+	call lba_to_chs
+
+	mov ax, 0x1000
+	mov es, ax
+	mov bx, 0x0C00
+	mov ah, 0x02
+	mov al, 1
+	mov dl, 0
+	int 0x13
+	jc .error
+
+	pop ax
+	and ax, 0x01FF
+	mov si, 0x0C00
+	add si, ax
+	mov ax, [si]
+
+	mov bx, [cluster_temp]
+	test bx, 1
+	je .even
+	shr ax, 4
+
+.even:
+	and ax, 0x0FFF
+
+	pop es
+	pop si
+	pop dx
+	pop cx
+	pop bx
+	ret
+
+.error:
+
+	xor ax, ax
+	pop ax
+	pop es
+	pop si
+	pop dx
+	pop cx
+	pop bx
+	ret
+
+;--------------- FAT12 : ecrire une entrée ----------------
+;Entrée : AX = cluster, DX= Valeur
+
+fat_set:
+
+	push ax
+	push bx
+	push cx
+	push dx
+	push si
+	push es
+
+	mov [cluster_temp], ax
+	mov bx, ax
+	push dx
+
+	mov ax, ax
+	shr ax, 1
+	add ax, bx
+	push ax
+
+	xor dx, dx
+	mov cx, 512
+	div cx
+	add ax, 1
+	call lba_to_chs
+
+	mov ax, 0x1000
+	mov es, ax
+	mov bx, 0x0C00
+	mov ah, 0x02
+	mov al, 1
+	mov dl, 0
+	int 0x13
+	jc .error
+
+	pop ax
+	and ax, 0x01FF
+	mov si, 0x0C00
+	add si, ax
+
+	mov ax, [si]
+	pop dx
+
+	mov bx, [cluster_temp]
+	test bx, 1
+	jnz .odd
+
+	and ax, 0xF000
+	and dx, 0x0FFF
+	or ax, dx
+	jmp .write
+
+.odd:
+
+	and ax, 0x000F
+	shl dx, 4
+	and dx, 0xFFF0
+	or ax, dx
+
+.write:
+
+	mov [si], ax
+
+	mov ax, 0x1000
+	mov es, ax
+	mov bx, 0x0C00
+	mov ah, 0x03
+	mov al, 1
+	mov dl, 0
+	int 0x13
+
+.error:
+
+	pop ax
+	pop dx
+	pop es
+	pop si
+	pop dx
+	pop cx
+	pop bx
+	pop ax
+	ret
+
+fat_find_free:
+
+	push bx
+	push cx
+
+	mov ax, 2
+
+.loop:
+
+	push ax
+	call fat_get
+	pop bx
+	test ax, ax
+	jz .found
+
+	mov ax, bx
+	inc ax
+	cmp ax, 2848
+	jb .loop
+
+	mov ax, 0xFFFF
+	jmp .done
+
+.found:
+
+	mov ax, bx
+
+.done:
+
+	pop cx
+	pop bx
+	ret
 
 ; ---------- Affichage ----------
 print:
@@ -889,6 +1115,7 @@ msg_reset db 'Disque reinitialise', 13, 10, 0
 msg_pause db 'Appuyez sur une touche...', 13, 10, 0
 msg_date_prefix db 'Date :', 0
 msg_time_prefix db 'Heure :', 0
+msg_fatinfo db 'Cluster libre : ', 0
 
 cmd_help     db 'help', 0
 cmd_dir      db 'dir', 0
@@ -902,7 +1129,9 @@ cmd_echo db 'echo', 0
 cmd_pause db 'pause', 0
 cmd_date db  'date', 0
 cmd_time db 'time', 0
+cmd_fatinfo db 'fatinfo', 0
 
 fatname      times 11 db 0
 file_size    dw 0
+cluster_temp dw 0
 buffer       times 256 db 0
