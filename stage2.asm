@@ -330,6 +330,8 @@ do_del:
 	call del_file
 	cmp ax, 0xFFFF
 	je .error
+	cmp ax, 0xFFFE
+	je .protected
 	mov si, msg_del_ok
 	call print
 	jmp main_loop
@@ -337,6 +339,12 @@ do_del:
 .error:
 
 	mov si, msg_del_err
+	call print
+	jmp main_loop
+
+.protected:
+
+	mov si, msg_del_protected
 	call print
 	jmp main_loop
 
@@ -844,9 +852,12 @@ free_cluster_chain:
 	cmp bx, 2
 	jb .done
 
+	mov [free_temp], bx
 	mov ax, bx
 	call fat_get
 	mov cx, ax
+
+	mov ax, [free_temp]
 	xor dx, dx
 	call fat_set
 
@@ -1099,6 +1110,12 @@ del_file:
 	call find_file
 	jc .error
 
+	mov al, [si + 11]
+	test al, 0x01
+	jnz .protected
+	test al, 0x04
+	jnz .protected
+
 	mov ax, [si + 26]
 
 	call free_cluster_chain
@@ -1124,6 +1141,11 @@ del_file:
 	pop ax
 
 	xor ax, ax
+	jmp .done
+
+.protected:
+
+	mov ax, 0xFFFE
 	jmp .done
 
 .error:
@@ -1738,6 +1760,7 @@ msg_copy_ok db 'Fichier copie.', 13, 10, 0
 msg_copy_err db 'Erreur de copie', 13, 10, 0
 msg_del_ok db 'Fichier supprime.', 13, 10, 0
 msg_del_err db 'Erreur de Suppression', 13, 10, 0
+msg_del_protected db 'Suppression refusee : fichier systeme.',  13, 10, 0
 msg_del_usage db 'Usage : del NOM.TXT', 13, 10, 0
 msg_ren_ok db 'Fichier renomme.', 13, 10, 0
 msg_ren_err db 'Erreur renomage.', 13, 10, 0
@@ -1769,4 +1792,5 @@ arg1_ptr dw 0
 arg2_ptr dw 0
 src_size dw 0
 parse_skip dw 5
+free_temp dw 0
 buffer       times 256 db 0
