@@ -87,6 +87,21 @@ main_loop:
     jc do_mkfile
 
     mov si, buffer
+    mov di, cmd_copy
+    call strcmp
+    jc do_copy
+
+    mov si, buffer
+    mov di, cmd_del
+    call strcmp
+    jc do_del
+
+    mov si, buffer
+    mov di, cmd_ren
+    call strcmp
+    jc do_ren
+
+    mov si, buffer
     mov di, cmd_rebootdos
     call strcmp
     jc do_rebootdos
@@ -273,6 +288,7 @@ do_mkfile:
     add si, 7
     cmp byte [si-1], ' '
     jne .usage
+    mov word [src_size], 0
     call create_file
     cmp ax, 0xFFFF
     je .error
@@ -289,6 +305,67 @@ do_mkfile:
     mov si, msg_mkfile_usage
     call print
     jmp main_loop
+
+do_copy:
+
+	call copy_file
+	cmp ax, 0xFFFF
+	je .error
+	mov si, msg_copy_ok
+	call print
+	jmp main_loop
+
+.error:
+
+	mov si, msg_copy_err
+	call print
+	jmp main_loop
+
+do_del:
+
+	mov si, buffer
+	add si, 4
+	cmp byte [si-1], ' '
+	jne .usage
+	call del_file
+	cmp ax, 0xFFFF
+	je .error
+	mov si, msg_del_ok
+	call print
+	jmp main_loop
+
+.error:
+
+	mov si, msg_del_err
+	call print
+	jmp main_loop
+
+.usage:
+
+	mov si, msg_del_usage
+	call print
+	jmp main_loop
+
+do_ren:
+
+	call ren_file
+	cmp ax, 0xFFFF
+	je .error
+	mov si, msg_ren_ok
+	call print
+	jmp main_loop
+
+.error:
+
+	mov si, msg_ren_err
+	call print
+	jmp main_loop
+
+.usage:
+
+	mov si, msg_ren_usage
+	call print
+	jmp main_loop
 
 ; ---------- DIR ----------
 do_dir:
@@ -595,7 +672,7 @@ fat_get:
 
 	mov ax, 0x1000
 	mov es, ax
-	mov bx, 0x0C00
+	mov bx, 0x6000
 	mov ah, 0x02
 	mov al, 1
 	mov dl, 0
@@ -604,7 +681,7 @@ fat_get:
 
 	pop ax
 	and ax, 0x01FF
-	mov si, 0x0C00
+	mov si, 0x6000
 	add si, ax
 	mov ax, [si]
 
@@ -663,7 +740,7 @@ fat_set:
 
 	mov ax, 0x1000
 	mov es, ax
-	mov bx, 0x0C00
+	mov bx, 0x6000
 	mov ah, 0x02
 	mov al, 1
 	mov dl, 0
@@ -672,7 +749,7 @@ fat_set:
 
 	pop ax
 	and ax, 0x01FF
-	mov si, 0x0C00
+	mov si, 0x6000
 	add si, ax
 
 	mov ax, [si]
@@ -698,7 +775,7 @@ fat_set:
 	mov [si], ax
 	mov ax, 0x1000
 	mov es, ax
-	mov bx, 0x0C00
+	mov bx, 0x6000
 	mov ch, 0
 	mov cl, 2
 	mov dh, 0
@@ -749,6 +826,40 @@ fat_find_free:
 	pop cx
 	pop bx
 	ret
+
+; ------------------ FAT12 libere une chaine de cluster -----------
+
+free_cluster_chain:
+
+	push ax
+	push bx
+	push cx
+
+	mov bx, ax
+
+.loop:
+
+	cmp bx, 0xFF8
+	jae .done
+	cmp bx, 2
+	jb .done
+
+	mov ax, bx
+	call fat_get
+	mov cx, ax
+	xor dx, dx
+	call fat_set
+
+	mov bx, cx
+	jmp .loop
+
+.done:
+
+	pop cx
+	pop bx
+	pop ax
+	ret
+
 
 ;------------------- Trouver une entrée libre ---------------------
 
@@ -806,6 +917,296 @@ find_free_entry:
 	pop cx
 	pop bx
 	pop ax
+	ret
+
+;-------------------------- FAT12 : ecrire un cluster sur la disquette ------------
+
+write_cluster:
+
+	push ax
+	push bx
+	push cx
+	push dx
+	push es
+
+	add ax, 31
+	call lba_to_chs
+
+	push ds
+	pop es
+	mov bx, 0xA000
+
+	mov ah, 0x03
+	mov al, 1
+	mov dl, 0
+	int 0x13
+
+	push ax
+	xor ax, ax
+	mov dl, 0
+	int 0x13
+	pop ax
+
+	pop es
+	pop dx
+	pop cx
+	pop bx
+	pop ax
+	ret
+
+;-------------- Parser deux argument -----------------------------
+
+parse_two_args:
+
+	push ax
+	push si
+
+	mov si, buffer
+	add si, [parse_skip]
+
+	mov [arg1_ptr], si
+
+.skip1:
+
+	lodsb
+	or al, al
+	jz .error
+	cmp al, ' '
+	jne .skip1
+
+	dec si
+	mov byte [si], 0
+	inc si
+	mov [arg2_ptr], si
+
+	clc
+	jmp .done
+
+.error:
+
+	stc
+
+.done:
+
+	pop si
+	pop ax
+	ret
+
+;-------------------------- lire un fichier dans le buffer -------
+
+read_file:
+
+	push bx
+	push cx
+	push dx
+	push si
+	push di
+	push es
+
+	call build_fat_name
+
+	call find_file
+	jc .error
+
+	mov ax, [si + 26]
+	mov bx, [si + 28]
+	mov [src_size], bx
+
+	add ax, 31
+	call lba_to_chs
+
+	mov ax, 0x1000
+	mov es, ax
+	mov bx, 0xA000
+	mov ah, 0x02
+	mov al, 1
+	mov dl, 0
+	int 0x13
+	jc .error
+
+	xor ax, ax
+	jmp .done
+
+.error:
+
+	mov ax, 0xFFFF
+
+.done:
+
+	pop es
+	pop di
+	pop si
+	pop dx
+	pop cx
+	pop bx
+	ret
+
+;-------------------------- copier un fichier ---------------------
+
+copy_file:
+
+	push bx
+	push cx
+	push dx
+	push si
+	push di
+
+	mov word [parse_skip], 5
+	call parse_two_args
+	jc .error
+
+	mov si, [arg1_ptr]
+	call read_file
+	cmp ax, 0xFFFF
+	je .error
+
+	mov si, [arg2_ptr]
+	call create_file
+	cmp ax, 0xFFFF
+	je .error
+
+	call write_cluster
+
+	xor ax, ax
+	jmp .done
+
+.error:
+
+	mov ax, 0xFFFF
+
+.done:
+
+	pop di
+	pop si
+	pop dx
+	pop cx
+	pop bx
+	ret
+
+;-------------------------- Supprimer un Fichier -----------------
+
+del_file:
+
+	push bx
+	push cx
+	push dx
+	push si
+	push di
+	push es
+
+	call build_fat_name
+
+	call find_file
+	jc .error
+
+	mov ax, [si + 26]
+
+	call free_cluster_chain
+
+	mov byte [si], 0xE5
+
+	mov ax, 0x1000
+	mov es, ax
+	mov bx, 0x8000
+	mov ch, 0
+	mov cl, 2
+	mov dh, 1
+	mov dl, 0
+	mov ah, 0x03
+	mov al, 14
+	int 0x13
+	jc .error
+
+	push ax
+	xor ax, ax
+	mov dl, 0
+	int 0x13
+	pop ax
+
+	xor ax, ax
+	jmp .done
+
+.error:
+
+	mov ax, 0xFFFF
+
+.done:
+
+	pop es
+	pop di
+	pop si
+	pop dx
+	pop cx
+	pop bx
+	ret
+
+;------------------------- renommer un fichier -------------------
+
+ren_file:
+
+	push bx
+	push cx
+	push dx
+	push si
+	push di
+	push es
+
+	mov word [parse_skip], 4
+	call parse_two_args
+	jc .error
+
+	mov si, [arg1_ptr]
+	call build_fat_name
+	call find_file
+	jc .error
+
+	mov di, si
+
+	mov si, [arg2_ptr]
+	call build_fat_name
+
+	mov si, fatname
+	mov cx, 11
+
+.copy_name:
+
+	lodsb
+	stosb
+	loop .copy_name
+
+	mov ax, 0x1000
+	mov es, ax
+	mov bx, 0x8000
+	mov ch, 0
+	mov cl, 2
+	mov dh, 1
+	mov dl, 0
+	mov ah, 0x03
+	mov al, 14
+	int 0x13
+	jc .error
+
+	push ax
+	xor ax, ax
+	mov dl, 0
+	int 0x13
+	pop ax
+
+	xor ax, ax
+	jmp .done
+
+.error:
+
+	mov ax, 0xFFFF
+
+.done:
+
+	pop es
+	pop di
+	pop si
+	pop dx
+	pop cx
+	pop bx
 	ret
 
 ;-------------------------- Ecrire une entrée ---------------------
@@ -895,7 +1296,7 @@ create_file:
 	mov si, fatname
 	mov ax, [cluster_temp]
 	mov dx, ax
-	xor bx, bx
+	mov bx, [src_size]
 	call write_dir_entry
 
 	mov ax, [cluster_temp]
@@ -1315,7 +1716,10 @@ msg_help     db 'Liste des Commandes', 13, 10
              db ' pause - attend une touche', 13, 10
              db ' date - affiche la date', 13, 10
              db ' time - affiche l heure', 13, 10
-	     db ' mkfile <nom> - cree un fichier', 13, 10, 0
+	     db ' mkfile <nom> - cree un fichier', 13, 10
+	     db ' copy <src> <dst> - copie un fichier', 13, 10
+	     db ' del - Supprime un fichier', 13, 10
+	     db ' ren <ANCIEN NOM> <NOUVEAU NOM> - renomme un fichier', 13, 10, 0
 msg_unknow   db 'Commande inconnue. Tapez "help".', 13, 10, 0
 msg_ver      db 'MicroDOS v0.8', 13, 10, 0
 msg_reboot   db 'Redemarrage en cours...', 13, 10, 0
@@ -1330,6 +1734,14 @@ msg_fatinfo db 'Cluster libre : ', 0
 msg_mkfile_ok db 'Fichier cree', 13, 10, 0
 msg_mkfile_err db 'Erreur creation', 13, 10, 0
 msg_mkfile_usage db 'Usage : mkfile NOM.TXT', 13, 10, 0
+msg_copy_ok db 'Fichier copie.', 13, 10, 0
+msg_copy_err db 'Erreur de copie', 13, 10, 0
+msg_del_ok db 'Fichier supprime.', 13, 10, 0
+msg_del_err db 'Erreur de Suppression', 13, 10, 0
+msg_del_usage db 'Usage : del NOM.TXT', 13, 10, 0
+msg_ren_ok db 'Fichier renomme.', 13, 10, 0
+msg_ren_err db 'Erreur renomage.', 13, 10, 0
+msg_ren_usage db 'Usage : <ANCIEN NOM> <NOUVEAU NOM>'
 
 cmd_help     db 'help', 0
 cmd_dir      db 'dir', 0
@@ -1345,8 +1757,16 @@ cmd_date db  'date', 0
 cmd_time db 'time', 0
 cmd_fatinfo db 'fatinfo', 0
 cmd_mkfile db 'mkfile', 0
+cmd_copy db 'copy', 0
+cmd_del db 'del', 0
+cmd_ren db 'ren', 0
+
 
 fatname      times 11 db 0
 file_size    dw 0
 cluster_temp dw 0
+arg1_ptr dw 0
+arg2_ptr dw 0
+src_size dw 0
+parse_skip dw 5
 buffer       times 256 db 0
