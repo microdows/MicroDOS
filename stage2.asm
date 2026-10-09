@@ -16,6 +16,7 @@ start:
 	pop es
 	sti
 
+    mov word [current_cluster], 0
     mov si, msg_welcome
     call print
 
@@ -100,6 +101,11 @@ main_loop:
     mov di, cmd_ren
     call strcmp
     jc do_ren
+
+    mov si, buffer
+    mov di, cmd_cd
+    call strcmp
+    jc do_cd
 
     mov si, buffer
     mov di, cmd_rebootdos
@@ -375,18 +381,36 @@ do_ren:
 	call print
 	jmp main_loop
 
+do_cd:
+
+	mov si, buffer
+	add si, 3
+	cmp byte [si-1], ' '
+	jne .root
+	call cd_dir
+	cmp ax, 0xFFFF
+	je .error
+	mov si, msg_cd_ok
+	call print
+	jmp main_loop
+
+.root:
+
+	mov word [current_cluster], 0
+	mov si, msg_cd_ok
+	call print
+	jmp main_loop
+
+.error:
+
+	mov si, msg_cd_err
+	call print
+	jmp main_loop
+
 ; ---------- DIR ----------
 do_dir:
-    mov ax, 0x1000
-    mov es, ax
-    mov bx, 0x8000
-    mov ah, 0x02
-    mov al, 14
-    mov ch, 0
-    mov cl, 2
-    mov dh, 1
-    mov dl, 0
-    int 0x13
+
+    call load_current_dir
     jc .error
 
     mov si, 0x8000
@@ -400,9 +424,9 @@ do_dir:
     je .next
 
     mov al, [si+11]
+    cmp al, 0x0F
+    je .next
     test al, 0x08
-    jnz .next
-    test al, 0x10
     jnz .next
 
     mov di, si
@@ -522,15 +546,23 @@ build_fat_name:
     je .pad_name
     cmp al, 0
     je .pad_name
-    mov [di], al
-    inc di
-    inc si
-    dec cx
-    jnz .copy_name
-    cmp byte [si], '.'
-    jne .copy_ext
-    inc si
-    jmp .copy_ext
+    cmp al, 'a'
+    jb .store_name
+    cmp al, 'z'
+    ja .store_name
+    sub al, 32
+
+.store_name:
+
+	mov [di], al
+	inc di
+	inc si
+	dec cx
+	jnz .copy_name
+	cmp byte [si], '.'
+	jne .copy_ext
+	inc si
+	jmp .copy_ext
 
 .pad_name:
     test cx, cx
@@ -551,12 +583,21 @@ build_fat_name:
     mov al, [si]
     cmp al, 0
     je .pad_ext
-    mov [di], al
-    inc di
-    inc si
-    dec cx
-    jnz .copy_ext_loop
-    jmp .done
+    cmp al, 'a'
+    jb .store_ext
+    cmp al, 'z'
+    ja .store_ext
+    sub al, 32
+
+.store_ext:
+
+	mov [di], al
+	inc di
+	inc si
+	dec cx
+	jnz .copy_ext_loop
+	jmp .done
+
 
 .pad_ext:
     test cx, cx
@@ -574,16 +615,8 @@ build_fat_name:
 ; ---------- Cherche [fatname] dans le repertoire racine ----------
 ; Retourne SI = entree trouvee, ou Carry=1 si pas trouve
 find_file:
-    mov ax, 0x1000
-    mov es, ax
-    mov bx, 0x8000
-    mov ah, 0x02
-    mov al, 14
-    mov ch, 0
-    mov cl, 2
-    mov dh, 1
-    mov dl, 0
-    int 0x13
+
+    call load_current_dir
     jc .err
 
     mov di, 0x8000
@@ -594,6 +627,9 @@ find_file:
     cmp al, 0
     je .not_found
     cmp al, 0xE5
+    je .next
+    mov al, [di+11]
+    cmp al, 0x0F
     je .next
 
     push si
@@ -871,6 +907,104 @@ free_cluster_chain:
 	pop ax
 	ret
 
+; ------------------ Charger le repectoire courant a 0x8000 ------
+
+load_current_dir:
+
+	push ax
+	push bx
+	push cx
+	push dx
+	push es
+
+	mov ax, [current_cluster]
+	test ax, ax
+	jz .root
+
+	add ax, 31
+	call lba_to_chs
+	jmp .load
+
+.root:
+
+	mov ch, 0
+	mov cl, 2
+	mov dh, 1
+
+.load:
+
+	mov ax, 0x1000
+	mov es, ax
+	mov bx, 0x8000
+	mov dl, 0
+	mov ah, 0x02
+
+	cmp word [current_cluster], 0
+	jne .one_sector
+	mov al, 14
+	jmp .do_read
+
+.one_sector:
+
+	mov al, 1
+
+.do_read:
+
+	int 0x13
+	pop es
+	pop dx
+	pop cx
+	pop bx
+	pop ax
+	ret
+
+; ------------------ changer de repectoire -----------------------
+
+cd_dir:
+
+	push bx
+	push cx
+	push dx
+	push si
+	push di
+
+	cmp byte [si], '.'
+	jne .normal
+	cmp byte [si+1], '.'
+	jne .normal
+	mov word [current_cluster], 0
+	xor ax, ax
+	jmp .done
+
+.normal:
+
+	call build_fat_name
+	call find_file
+	jc .error
+
+	mov al, [si + 11]
+	test al, 0x10
+	jz .error
+
+	mov ax, [si + 26]
+	mov [current_cluster], ax
+
+	xor ax, ax
+	jmp .done
+
+.error:
+
+	mov ax, 0xFFFF
+
+.done:
+
+	pop di
+	pop si
+	pop dx
+	pop cx
+	pop bx
+	ret
+
 
 ;------------------- Trouver une entrée libre ---------------------
 
@@ -882,16 +1016,7 @@ find_free_entry:
 	push dx
 	push es
 
-	mov ax, 0x1000
-	mov es, ax
-	mov bx, 0x8000
-	mov ah, 0x02
-	mov al, 14
-	mov ch, 0
-	mov cl, 2
-	mov dh, 1
-	mov dl, 0
-	int 0x13
+	call load_current_dir
 	jc .error
 
 	mov si, 0x8000
@@ -1721,7 +1846,7 @@ int21_handler:
 
 
 ; ---------- Donnees ----------
-msg_welcome  db 'MicroDOS v0.8.1 - Shell', 13, 10
+msg_welcome  db 'MicroDOS v0.8 - Shell', 13, 10
              db 'tapez "help" pour la liste de commandes.', 13, 10, 10, 0
 msg_prompt   db '> ', 0
 msg_help     db 'Liste des Commandes', 13, 10
@@ -1741,9 +1866,10 @@ msg_help     db 'Liste des Commandes', 13, 10
 	     db ' mkfile <nom> - cree un fichier', 13, 10
 	     db ' copy <src> <dst> - copie un fichier', 13, 10
 	     db ' del - Supprime un fichier', 13, 10
-	     db ' ren <ANCIEN NOM> <NOUVEAU NOM> - renomme un fichier', 13, 10, 0
+	     db ' ren <ANCIEN NOM> <NOUVEAU NOM> - renomme un fichier', 13, 10
+             db ' cd - Change de Repectoire', 13, 10, 0
 msg_unknow   db 'Commande inconnue. Tapez "help".', 13, 10, 0
-msg_ver      db 'MicroDOS v0.8.1', 13, 10, 0
+msg_ver      db 'MicroDOS v0.8', 13, 10, 0
 msg_reboot   db 'Redemarrage en cours...', 13, 10, 0
 msg_rebootdos db 'Redemarrage de MicroDOS...', 13, 10, 0
 msg_dir_err  db 'Erreur lecture disque.', 13, 10, 0
@@ -1765,6 +1891,8 @@ msg_del_usage db 'Usage : del NOM.TXT', 13, 10, 0
 msg_ren_ok db 'Fichier renomme.', 13, 10, 0
 msg_ren_err db 'Erreur renomage.', 13, 10, 0
 msg_ren_usage db 'Usage : <ANCIEN NOM> <NOUVEAU NOM>'
+msg_cd_ok db 'Repectoire change.', 13, 10, 0
+msg_cd_err dw 'Repectoire Introuvable', 13, 10, 0
 
 cmd_help     db 'help', 0
 cmd_dir      db 'dir', 0
@@ -1783,6 +1911,7 @@ cmd_mkfile db 'mkfile', 0
 cmd_copy db 'copy', 0
 cmd_del db 'del', 0
 cmd_ren db 'ren', 0
+cmd_cd db 'cd', 0
 
 
 fatname      times 11 db 0
@@ -1793,4 +1922,5 @@ arg2_ptr dw 0
 src_size dw 0
 parse_skip dw 5
 free_temp dw 0
+current_cluster dw 0
 buffer       times 256 db 0
