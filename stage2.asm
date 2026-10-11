@@ -17,10 +17,17 @@ start:
 	sti
 
     mov word [current_cluster], 0
+
+	mov si, init_path
+	mov di, current_path
+	call copy_str
+
     mov si, msg_welcome
     call print
 
 main_loop:
+	mov si, current_path
+	call print
     mov si, msg_prompt
     call print
 
@@ -106,6 +113,16 @@ main_loop:
     mov di, cmd_cd
     call strcmp
     jc do_cd
+
+    mov si, buffer
+    mov di, cmd_mkdir
+    call strcmp
+    jc do_mkdir
+
+    mov si, buffer
+    mov di, cmd_rmdir
+    call strcmp
+    jc do_rmdir
 
     mov si, buffer
     mov di, cmd_rebootdos
@@ -294,23 +311,31 @@ do_mkfile:
     add si, 7
     cmp byte [si-1], ' '
     jne .usage
+    call resolve_path
+    jc .error
     mov word [src_size], 0
     call create_file
     cmp ax, 0xFFFF
     je .error
     mov si, msg_mkfile_ok
     call print
-    jmp main_loop
+    jmp .exit
 
 .error:
     mov si, msg_mkfile_err
     call print
-    jmp main_loop
+    jmp .exit
 
 .usage:
     mov si, msg_mkfile_usage
     call print
-    jmp main_loop
+    jmp .exit
+
+.exit:
+
+	mov ax, [saved_cluster]
+	mov [current_cluster], ax
+	jmp main_loop
 
 do_copy:
 
@@ -333,31 +358,47 @@ do_del:
 	add si, 4
 	cmp byte [si-1], ' '
 	jne .usage
+	call resolve_path
+	jc .error
 	call del_file
 	cmp ax, 0xFFFF
 	je .error
 	cmp ax, 0xFFFE
 	je .protected
+	cmp ax, 0xFFFD
+	je .is_dir
 	mov si, msg_del_ok
 	call print
-	jmp main_loop
+	jmp .exit
 
 .error:
 
 	mov si, msg_del_err
 	call print
-	jmp main_loop
+	jmp .exit
 
 .protected:
 
 	mov si, msg_del_protected
 	call print
-	jmp main_loop
+	jmp .exit
 
 .usage:
 
 	mov si, msg_del_usage
 	call print
+	jmp .exit
+
+.is_dir:
+
+	mov si, msg_del_dir
+	call print
+	jmp .exit
+
+.exit:
+
+	mov ax, [saved_cluster]
+	mov [current_cluster], ax
 	jmp main_loop
 
 do_ren:
@@ -365,20 +406,34 @@ do_ren:
 	call ren_file
 	cmp ax, 0xFFFF
 	je .error
+	cmp ax, 0xFFFE
+	je .protected
 	mov si, msg_ren_ok
 	call print
-	jmp main_loop
+	jmp .exit
 
 .error:
 
 	mov si, msg_ren_err
 	call print
-	jmp main_loop
+	jmp .exit
+
+.protected:
+
+	mov si, msg_ren_protected
+	call print
+	jmp .exit
 
 .usage:
 
 	mov si, msg_ren_usage
 	call print
+	jmp .exit
+
+.exit:
+
+	mov ax, [saved_cluster]
+	mov [current_cluster], ax
 	jmp main_loop
 
 do_cd:
@@ -390,15 +445,11 @@ do_cd:
 	call cd_dir
 	cmp ax, 0xFFFF
 	je .error
-	mov si, msg_cd_ok
-	call print
 	jmp main_loop
 
 .root:
 
 	mov word [current_cluster], 0
-	mov si, msg_cd_ok
-	call print
 	jmp main_loop
 
 .error:
@@ -406,6 +457,74 @@ do_cd:
 	mov si, msg_cd_err
 	call print
 	jmp main_loop
+
+do_mkdir:
+
+	mov si, buffer
+	add si, 6
+	cmp byte [si-1], ' '
+	jne .usage
+	call resolve_path
+	jc .error
+	call mkdir_dir
+	cmp ax, 0xFFFF
+	je .error
+	mov si, msg_mkdir_ok
+	call print
+	jmp .exit
+
+.error:
+
+	mov si, msg_mkdir_err
+	call print
+	jmp .exit
+
+.usage:
+
+	mov si, msg_mkdir_usage
+	call print
+	jmp .exit
+
+.exit:
+
+	mov ax, [saved_cluster]
+	mov [current_cluster], ax
+	jmp main_loop
+
+do_rmdir:
+
+	mov si, buffer
+	add si, 6
+	cmp byte [si-1], ' '
+	jne .usage
+	call resolve_path
+	jc .error
+	call rmdir_dir
+	cmp ax, 0xFFFF
+	je .error
+	mov si, msg_rmdir_ok
+	call print
+	jmp .exit
+
+.error:
+
+	mov si, msg_rmdir_err
+	call print
+	jmp .exit
+
+.usage:
+
+	mov si, msg_rmdir_usage
+	call print
+	jmp .exit
+
+.exit:
+
+
+        mov ax, [saved_cluster]
+        mov [current_cluster], ax
+        jmp main_loop
+
 
 ; ---------- DIR ----------
 do_dir:
@@ -461,12 +580,21 @@ do_dir:
 .ext_done:
 .no_ext:
 
-    mov ah, 0x0E
-    mov al, 13
-    int 0x10
-    mov al, 10
-    int 0x10
+	push si
+	mov al, [si+11]
+	test al, 0X10
+	jz .not_dir
+	mov si, msg_dir_tag
+	call print
 
+.not_dir:
+
+	pop si
+	mov ah, 0x0E
+	mov al, 13
+	int 0x10
+	mov al, 10
+	int 0x10
 .next:
     add si, 32
     dec bp
@@ -484,9 +612,14 @@ do_dir:
 do_type:
     mov si, buffer
     add si, 5
+    call resolve_path
     call build_fat_name
     call find_file
     jc .not_found
+
+    mov al, [si + 11]
+    test al, 0x10
+    jnz .not_found
 
     mov ax, [si + 26]
     mov bx, [si + 28]
@@ -516,6 +649,8 @@ do_type:
     jmp .print
 
 .done:
+    mov ax, [saved_cluster]
+    mov [current_cluster], ax
     mov ah, 0x0E
     mov al, 13
     int 0x10
@@ -524,11 +659,15 @@ do_type:
     jmp main_loop
 
 .not_found:
+    mov ax, [saved_cluster]
+    mov [current_cluster], ax
     mov si, msg_not_found
     call print
     jmp main_loop
 
 .read_err:
+    mov ax, [saved_cluster]
+    mov [current_cluster], ax
     mov si, msg_dir_err
     call print
     jmp main_loop
@@ -545,6 +684,10 @@ build_fat_name:
     cmp al, '.'
     je .pad_name
     cmp al, 0
+    je .pad_name
+    cmp al, '\'
+    je .pad_name
+    cmp al, '/'
     je .pad_name
     cmp al, 'a'
     jb .store_name
@@ -582,6 +725,10 @@ build_fat_name:
 .copy_ext_loop:
     mov al, [si]
     cmp al, 0
+    je .pad_ext
+    cmp al, '\'
+    je .pad_ext
+    cmp al, '/'
     je .pad_ext
     cmp al, 'a'
     jb .store_ext
@@ -958,6 +1105,479 @@ load_current_dir:
 	pop ax
 	ret
 
+; ----------------- copier une chaine ----------------------------
+
+copy_str:
+
+	lodsb
+	stosb
+	test al, al
+	jnz copy_str
+	ret
+
+; ----------------- ajouter un nom au chemain --------------------
+
+append_path:
+
+	push ax
+	push di
+	push si
+
+	mov di, current_path
+
+.find_end:
+
+	cmp byte [di], 0
+	je .add
+	inc di
+	jmp .find_end
+
+.add:
+
+	cmp di, current_path
+	je .no_backslash
+	cmp byte [di-1], '\'
+	je .copy
+	mov byte [di], '\'
+	inc di
+	jmp .copy
+
+.no_backslash:
+
+	mov byte [di], '\'
+	inc di
+
+.copy:
+
+	lodsb
+	test al, al
+	jz .copy_done
+	cmp al, 'a'
+	jb .store
+	cmp al, 'z'
+	ja .store
+	sub al, 32
+
+.store:
+	stosb
+	jmp .copy
+
+.copy_done:
+
+	pop si
+	pop di
+	pop ax
+	ret
+
+;------------------------- enlever le nom du chemin ------------------------
+
+chop_path:
+
+	push ax
+	push di
+
+	mov di, current_path
+
+	cmp byte [di+3], 0
+	je .done
+
+.find_end:
+
+	cmp byte [di], 0
+	je .go_back
+	inc di
+	jmp .find_end
+
+.go_back:
+
+.back:
+
+	cmp di, current_path
+	jbe .done
+	dec di
+	cmp byte [di], '\'
+	je .truncate
+	jmp .back
+
+.truncate:
+
+	mov ax, di
+	sub ax, current_path
+	cmp ax, 2
+	je .keep_root
+
+	mov byte [di], 0
+	jmp .done
+
+.keep_root:
+
+	mov byte [di+1], 0
+.done:
+
+	pop di
+	pop ax
+	ret
+
+
+; ----------------- resoudre un chemin ---------------------------
+
+resolve_path:
+
+	push ax
+	push bx
+	push di
+	push es
+
+	mov ax, [current_cluster]
+	mov [saved_cluster], ax
+	mov [path_filename], si
+
+.loop:
+
+	mov di, si
+
+.scan:
+
+	mov al, [di]
+	test al, al
+	jz .done
+	cmp al, '\'
+	je .found_backslash
+	inc di
+	jmp .scan
+
+.found_backslash:
+
+	mov byte [di], 0
+	inc di
+	push di
+
+	call cd_dir
+	pop si
+	jc .error
+
+	mov [path_filename], si
+
+	jmp .loop
+
+.done:
+
+	clc
+	jmp .exit
+
+.error:
+
+	mov ax, [saved_cluster]
+	mov [current_cluster], ax
+	stc
+
+.exit:
+
+	pop es
+	pop di
+	pop bx
+	pop ax
+	ret
+
+
+; ------------------ Sauvegarde le repectoire courant ------------
+
+save_current_dir:
+
+	push ax
+	push bx
+	push cx
+	push bx
+	push es
+
+	mov ax, 0x1000
+	mov es, ax
+	mov bx, 0x8000
+
+	mov ax, [current_cluster]
+	test ax, ax
+	jz .root
+
+	add ax, 31
+	call lba_to_chs
+	mov al, 1
+	jmp .do_write
+
+.root:
+
+	mov ch, 0
+	mov cl, 2
+	mov dh, 1
+	mov al, 14
+
+.do_write:
+
+	mov dl, 0
+	mov ah, 0x03
+	int 0x13
+
+	push ax
+	xor ax, ax
+	mov dl, 0
+	int 0x13
+	pop ax
+
+	pop es
+	pop dx
+	pop cx
+	pop dx
+	pop ax
+	ret
+
+;------------------- creer un dossier ----------------------------
+
+mkdir_dir:
+
+	push bx
+	push cx
+	push dx
+	push si
+	push di
+
+	call build_fat_name
+
+	call fat_find_free
+	cmp ax, 0xFFFF
+	je .error
+	mov [cluster_temp], ax
+
+	mov dx, 0xFFF
+	call fat_set
+
+	call find_free_entry
+	jc .error
+
+	mov [dir_entry_addr], si
+
+	mov di, si
+	mov si, fatname
+	mov ax, [cluster_temp]
+	mov dx, ax
+	xor bx, bx
+	call write_dir_entry
+
+	mov di, [dir_entry_addr]
+	mov byte [di+11], 0x10
+
+	call init_new_dir
+	call save_current_dir
+
+	call save_current_dir
+
+	xor ax, ax
+	jmp .done
+
+.error:
+
+	mov ax, 0xFFFF
+
+.done:
+
+	pop di
+	pop si
+	pop dx
+	pop cx
+	pop bx
+	ret
+
+; ------------------ initialise un dossier -----------------------
+
+init_new_dir:
+
+	push ax
+	push bx
+	push cx
+	push dx
+	push di
+	push es
+
+	mov ax, 0x1000
+	mov es, ax
+	mov di, 0xA000
+
+	mov al, '.'
+	stosb
+	mov cx, 10
+
+	mov al, '.'
+	stosb
+	mov cx, 10
+
+.dot_pad:
+
+	mov al, ' '
+	stosb
+	loop .dot_pad
+
+	mov al, 0x10
+	stosb
+
+	mov cx, 10
+
+.dot_reserved:
+
+	xor al, al
+	stosb
+	loop .dot_reserved
+
+	xor ax, ax
+	stosw
+	stosw
+
+	mov ax, [cluster_temp]
+	stosw
+
+	xor ax, ax
+	stosw
+	stosw
+
+	mov al, '.'
+	stosb
+	mov al, '.'
+	stosb
+	mov cx, 9
+
+.dotdot_pad:
+
+	mov al, ' '
+	stosb
+	loop .dotdot_pad
+
+	mov al, 0x10
+	stosb
+
+	mov cx, 10
+
+.dotdot_reserved:
+
+	xor al, al
+	stosb
+	loop .dotdot_reserved
+
+	xor ax, ax
+	stosw
+	stosw
+
+	mov ax, [current_cluster]
+	stosw
+
+	xor ax, ax
+	stosw
+	stosw
+
+	mov ax, [cluster_temp]
+	add ax, 31
+	call lba_to_chs
+
+	mov ax, 0x1000
+	mov es, ax
+	mov bx, 0xA000
+	mov dl, 0
+	mov ah, 0x03
+	mov al, 1
+	int 0x13
+
+	push ax
+	xor ax, ax
+	mov dl, 0
+	int 0x13
+	pop ax
+
+	pop es
+	pop di
+	pop dx
+	pop cx
+	pop bx
+	pop ax
+	ret
+
+; ------------------ Suprimmer un dossier vide -------------------
+
+rmdir_dir:
+
+	push bx
+	push cx
+	push dx
+	push si
+	push di
+	push es
+
+	call build_fat_name
+
+	call find_file
+	jc .error
+
+	mov al, [si+11]
+	test al, 0x10
+	jz .error
+
+	mov ax, [si + 26]
+	mov [free_temp], ax
+
+	add ax, 31
+	call lba_to_chs
+
+	mov ax, 0x1000
+	mov es, ax
+	mov bx, 0xA000
+	mov dl, 0
+	mov ah, 0x02
+	mov al, 1
+	int 0x13
+	jc .error
+
+	mov di, 0xA000
+	mov cx, 16
+
+.check_loop:
+
+	mov al, [di]
+	cmp al, 0
+	je .empty
+	cmp al, 0xE5
+	je .skip
+	cmp al, '.'
+	je .skip
+	jmp .error
+
+.skip:
+
+	add di, 32
+	dec cx
+	jnz .check_loop
+	jmp .error
+
+.empty:
+
+	mov byte [si], 0xE5
+
+	call save_current_dir
+
+	mov ax, [free_temp]
+	call free_cluster_chain
+
+	xor ax, ax
+	jmp .done
+
+.error:
+
+	mov ax, 0xFFFF
+
+.done:
+
+	pop es
+	pop di
+	pop si
+	pop dx
+	pop cx
+	pop bx
+	ret
+
 ; ------------------ changer de repectoire -----------------------
 
 cd_dir:
@@ -973,11 +1593,13 @@ cd_dir:
 	cmp byte [si+1], '.'
 	jne .normal
 	mov word [current_cluster], 0
+	call chop_path
 	xor ax, ax
 	jmp .done
 
 .normal:
 
+	mov [path_filename], si       ; ← AJOUTÉ : sauvegarder le nom
 	call build_fat_name
 	call find_file
 	jc .error
@@ -988,6 +1610,9 @@ cd_dir:
 
 	mov ax, [si + 26]
 	mov [current_cluster], ax
+
+	mov si, [path_filename]       ; ← récupérer le nom
+	call append_path
 
 	xor ax, ax
 	jmp .done
@@ -1192,11 +1817,25 @@ copy_file:
 	jc .error
 
 	mov si, [arg1_ptr]
+	call resolve_path
+	jc .error
+	mov si, [path_filename]
+	mov [arg1_ptr], si
+
+
 	call read_file
 	cmp ax, 0xFFFF
 	je .error
 
+	mov ax, [saved_cluster]
+	mov [current_cluster], ax
+
 	mov si, [arg2_ptr]
+	call resolve_path
+	jc .error
+	mov si, [path_filename]
+	mov [arg2_ptr], si
+
 	call create_file
 	cmp ax, 0xFFFF
 	je .error
@@ -1210,7 +1849,11 @@ copy_file:
 
 	mov ax, 0xFFFF
 
+
 .done:
+
+	mov ax, [saved_cluster]
+	mov [current_cluster], ax
 
 	pop di
 	pop si
@@ -1234,6 +1877,10 @@ del_file:
 
 	call find_file
 	jc .error
+
+	mov al, [si+11]
+	test al, 0x10
+	jnz .is_dir
 
 	mov al, [si + 11]
 	test al, 0x01
@@ -1266,6 +1913,11 @@ del_file:
 	pop ax
 
 	xor ax, ax
+	jmp .done
+
+.is_dir:
+
+	mov ax, 0xFFFD
 	jmp .done
 
 .protected:
@@ -1307,6 +1959,12 @@ ren_file:
 	call find_file
 	jc .error
 
+	mov al, [si + 11]
+	test al, 0x01
+	jnz .protected
+	test al, 0x04
+	jnz .protected
+
 	mov di, si
 
 	mov si, [arg2_ptr]
@@ -1340,6 +1998,11 @@ ren_file:
 	pop ax
 
 	xor ax, ax
+	jmp .done
+
+.protected:
+
+	mov ax, 0xFFFE
 	jmp .done
 
 .error:
@@ -1399,16 +2062,7 @@ write_dir_entry:
 	xor ax, ax
 	stosw
 
-	mov ax, 0x1000
-	mov es, ax
-	mov bx, 0x8000
-	mov ah, 0x03
-	mov al, 14
-	mov ch, 0
-	mov cl, 2
-	mov dh, 1
-	mov dl, 0
-	int 0x13
+	call save_current_dir
 
 	pop es
 	pop di
@@ -1848,7 +2502,7 @@ int21_handler:
 ; ---------- Donnees ----------
 msg_welcome  db 'MicroDOS v0.8 - Shell', 13, 10
              db 'tapez "help" pour la liste de commandes.', 13, 10, 10, 0
-msg_prompt   db '> ', 0
+msg_prompt   db '>', 0
 msg_help     db 'Liste des Commandes', 13, 10
              db ' help - cette aide', 13, 10
              db ' dir - liste les fichiers', 13, 10
@@ -1867,7 +2521,9 @@ msg_help     db 'Liste des Commandes', 13, 10
 	     db ' copy <src> <dst> - copie un fichier', 13, 10
 	     db ' del - Supprime un fichier', 13, 10
 	     db ' ren <ANCIEN NOM> <NOUVEAU NOM> - renomme un fichier', 13, 10
-             db ' cd - Change de Repectoire', 13, 10, 0
+             db ' cd - Change de Repectoire', 13, 10
+             db ' mkdir <nom> - cree un dossier', 13, 10
+             db ' rmdir <nom> - Suprimme un dossier', 13, 10, 0
 msg_unknow   db 'Commande inconnue. Tapez "help".', 13, 10, 0
 msg_ver      db 'MicroDOS v0.8', 13, 10, 0
 msg_reboot   db 'Redemarrage en cours...', 13, 10, 0
@@ -1887,12 +2543,20 @@ msg_copy_err db 'Erreur de copie', 13, 10, 0
 msg_del_ok db 'Fichier supprime.', 13, 10, 0
 msg_del_err db 'Erreur de Suppression', 13, 10, 0
 msg_del_protected db 'Suppression refusee : fichier systeme.',  13, 10, 0
+msg_del_dir db 'Impossible de suprimer un repertoire.', 13, 10, 0
 msg_del_usage db 'Usage : del NOM.TXT', 13, 10, 0
 msg_ren_ok db 'Fichier renomme.', 13, 10, 0
 msg_ren_err db 'Erreur renomage.', 13, 10, 0
 msg_ren_usage db 'Usage : <ANCIEN NOM> <NOUVEAU NOM>'
-msg_cd_ok db 'Repectoire change.', 13, 10, 0
-msg_cd_err dw 'Repectoire Introuvable', 13, 10, 0
+msg_ren_protected db 'Impossible de Renommer : fichier systeme.', 13, 10, 0
+msg_cd_err db 'Repertoire Introuvable', 13, 10, 0
+msg_mkdir_ok db 'Repertoire', 13, 10, 0
+msg_mkdir_err db 'Erreur lors de la creation du dossier', 13, 10, 0
+msg_mkdir_usage db 'Usage : mkdir <NOM DU DOSSIER>', 13, 10, 0
+msg_rmdir_ok db 'Dossier suprime.', 13, 10, 0
+msg_rmdir_err db 'Erreur de suppression', 13, 10, 0
+msg_rmdir_usage db 'rmdir <NOM DU DOSSIER>', 13, 10, 0
+msg_dir_tag db ' <DIR>', 0
 
 cmd_help     db 'help', 0
 cmd_dir      db 'dir', 0
@@ -1912,6 +2576,8 @@ cmd_copy db 'copy', 0
 cmd_del db 'del', 0
 cmd_ren db 'ren', 0
 cmd_cd db 'cd', 0
+cmd_mkdir db 'mkdir', 0
+cmd_rmdir db 'rmdir', 0
 
 
 fatname      times 11 db 0
@@ -1923,4 +2589,9 @@ src_size dw 0
 parse_skip dw 5
 free_temp dw 0
 current_cluster dw 0
+dir_entry_addr dw 0
+saved_cluster dw 0
+path_filename dw 0
+current_path times 64 db 0
+init_path db 'A:\', 0
 buffer       times 256 db 0
