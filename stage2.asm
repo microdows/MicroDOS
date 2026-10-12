@@ -2500,7 +2500,7 @@ int21_handler:
 
 
 ; ---------- Donnees ----------
-msg_welcome  db 'MicroDOS v0.8 - Shell', 13, 10
+msg_welcome  db 'MicroDOS v0.9 - Shell', 13, 10
              db 'tapez "help" pour la liste de commandes.', 13, 10, 10, 0
 msg_prompt   db '>', 0
 msg_help     db 'Liste des Commandes', 13, 10
@@ -2525,7 +2525,7 @@ msg_help     db 'Liste des Commandes', 13, 10
              db ' mkdir <nom> - cree un dossier', 13, 10
              db ' rmdir <nom> - Suprimme un dossier', 13, 10, 0
 msg_unknow   db 'Commande inconnue. Tapez "help".', 13, 10, 0
-msg_ver      db 'MicroDOS v0.8', 13, 10, 0
+msg_ver      db 'MicroDOS v0.9', 13, 10, 0
 msg_reboot   db 'Redemarrage en cours...', 13, 10, 0
 msg_rebootdos db 'Redemarrage de MicroDOS...', 13, 10, 0
 msg_dir_err  db 'Erreur lecture disque.', 13, 10, 0
