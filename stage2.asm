@@ -1,6 +1,5 @@
 [BITS 16]
 [ORG 0x0000]
-
 start:
     push cs
     pop ds
@@ -1715,6 +1714,85 @@ write_cluster:
 	pop ax
 	ret
 
+; ------------- ecrire un fichier (Multi cluster) ---------------
+
+write_file:
+
+	push ax
+	push bx
+	push cx
+	push dx
+	push si
+	push di
+	push es
+
+	mov [free_temp], ax
+	mov [src_size], bx
+	mov si, 0xA000
+
+.write_loop:
+
+	mov ax, [free_temp]
+	add ax, 31
+	call lba_to_chs
+
+	push si
+	mov ax, 0x1000
+	mov es, ax
+	mov bx, si
+	mov dl, 0
+	mov ah, 0x03
+	mov al, 1
+	int 0x13
+	pop si
+	jc .error
+
+	add si, 512
+
+	mov ax, [src_size]
+	sub ax, 512
+	jbe .last_cluster
+	mov [src_size], ax
+
+	call fat_find_free
+	cmp ax, 0xFFFF
+	je .error
+	mov bx, ax
+
+	mov dx, bx
+	mov ax, [free_temp]
+	call fat_set
+
+	mov ax, dx
+	mov dx, 0xFFF
+	call fat_set
+
+	mov [free_temp], bx
+	jmp .write_loop
+
+.last_cluster:
+
+	mov ax, [free_temp]
+	mov dx, 0xFFF
+	call fat_set
+
+	xor ax, ax
+	jmp .done
+
+.error:
+
+	mov ax, 0xFFFF
+
+.done:
+
+	pop es
+	pop di
+	pop si
+	pop dx
+	pop cx
+	pop bx
+	pop ax
+	ret
 ;-------------- Parser deux argument -----------------------------
 
 parse_two_args:
@@ -1765,34 +1843,58 @@ read_file:
 	push es
 
 	call build_fat_name
-
 	call find_file
 	jc .error
 
+	mov ax, [si + 28]
+	mov [src_size], ax
+
 	mov ax, [si + 26]
-	mov bx, [si + 28]
-	mov [src_size], bx
+	mov [free_temp], ax
+
+	mov di, 0xA000
+
+.read_loop:
+
+	mov ax, [free_temp]
+	cmp ax, 0xFF8
+	jae .done
+	cmp ax, 2
+	jb .done
 
 	add ax, 31
 	call lba_to_chs
 
+
+	push di
 	mov ax, 0x1000
 	mov es, ax
-	mov bx, 0xA000
+	mov bx, di
+	mov dl, 0
 	mov ah, 0x02
 	mov al, 1
-	mov dl, 0
 	int 0x13
+	pop di
 	jc .error
 
+	add di, 512
+
+	mov ax, [free_temp]
+	call fat_get
+	mov [free_temp], ax
+	jmp .read_loop
+
+
+.done:
+
 	xor ax, ax
-	jmp .done
+	jmp .exit
 
 .error:
 
 	mov ax, 0xFFFF
 
-.done:
+.exit:
 
 	pop es
 	pop di
@@ -1837,6 +1939,11 @@ copy_file:
 	mov [arg2_ptr], si
 
 	call create_file
+	cmp ax, 0xFFFF
+	je .error
+
+	mov bx, [src_size]
+	call write_file
 	cmp ax, 0xFFFF
 	je .error
 
@@ -2500,7 +2607,7 @@ int21_handler:
 
 
 ; ---------- Donnees ----------
-msg_welcome  db 'MicroDOS v0.9 - Shell', 13, 10
+msg_welcome  db 'MicroDOS v1.0 Classic Edition - Shell', 13, 10
              db 'tapez "help" pour la liste de commandes.', 13, 10, 10, 0
 msg_prompt   db '>', 0
 msg_help     db 'Liste des Commandes', 13, 10
@@ -2525,7 +2632,7 @@ msg_help     db 'Liste des Commandes', 13, 10
              db ' mkdir <nom> - cree un dossier', 13, 10
              db ' rmdir <nom> - Suprimme un dossier', 13, 10, 0
 msg_unknow   db 'Commande inconnue. Tapez "help".', 13, 10, 0
-msg_ver      db 'MicroDOS v0.9', 13, 10, 0
+msg_ver      db 'MicroDOS v1.0 Classic Edition', 13, 10, 0
 msg_reboot   db 'Redemarrage en cours...', 13, 10, 0
 msg_rebootdos db 'Redemarrage de MicroDOS...', 13, 10, 0
 msg_dir_err  db 'Erreur lecture disque.', 13, 10, 0
