@@ -42,7 +42,7 @@ start:
 	xor bx, bx
 
 	mov ah, 0x02
-	mov al, 16
+	mov al, 20
 	mov ch, 0
 	mov cl, 16
 	mov dh, 1
@@ -72,5 +72,4 @@ msg_error db 'Erreur de Lecture!', 13, 10, 0
 
 times 510-($-$$) db 0
 dw 0xAA55
-
 
