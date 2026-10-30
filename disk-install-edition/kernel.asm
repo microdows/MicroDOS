@@ -199,6 +199,11 @@ main_loop:
     call strcmp
     jc do_reboot
 
+	mov si, buffer
+	mov di, cmd_format
+	call strcmp
+	jc do_format
+
     mov si, buffer
     call do_exec
     jmp main_loop
@@ -375,6 +380,32 @@ do_mkfile:
 .exit:
 	mov ax, [saved_cluster]
 	mov [current_cluster], ax
+	jmp main_loop
+
+do_format:
+
+	mov si, msg_format_warn
+	call print
+	mov ah, 0x00
+	int 0x16
+
+	mov ah, 0x0E
+	mov al, 13
+	int 0x10
+	mov al, 10
+	int 0x10
+
+	call format_hdd
+	jc .error
+	
+	mov si, msg_format_ok
+	call print
+	jmp main_loop
+
+	.error:
+
+	mov si, msg_format_err
+	call print
 	jmp main_loop
 
 do_copy:
@@ -2525,6 +2556,9 @@ msg_rmdir_ok db 'Dossier suprime.', 13, 10, 0
 msg_rmdir_err db 'Erreur de suppression', 13, 10, 0
 msg_rmdir_usage db 'rmdir <NOM DU DOSSIER>', 13, 10, 0
 msg_dir_tag db ' <DIR>', 0
+msg_format_warn db 'ATTENTION: Tout le disque dur va etre efface. Appuyez sur une touche pour continuer...', 13, 10, 0
+msg_format_ok db 'Disque dur formate avec succes !', 13, 10, 0
+msg_format_err db 'Erreur lors du formatage du disque dur.', 13, 10, 0 
 
 cmd_help     db 'help', 0
 cmd_dir      db 'dir', 0
@@ -2546,6 +2580,7 @@ cmd_ren db 'ren', 0
 cmd_cd db 'cd', 0
 cmd_mkdir db 'mkdir', 0
 cmd_rmdir db 'rmdir', 0
+cmd_format db 'format', 0
 
 fatname      times 11 db 0
 file_size    dw 0
@@ -2590,3 +2625,4 @@ fat16_ready db 0
 %include "fat16_write_file.inc"
 %include "fat16_create_file.inc"
 %include "cmd_copy.inc"
+%include "format.inc"
