@@ -227,12 +227,17 @@ fat_get:
     mov cx, 512
     div cx
     add ax, 1
+    mov word [fat12_sector_count], 1
+    cmp dx, 511
+    jne .read_fat
+    mov word [fat12_sector_count], 2
+.read_fat:
     call lba_to_chs
     mov ax, 0x1000
     mov es, ax
     mov bx, 0x6000
     mov ah, 0x02
-    mov al, 1
+    mov al, byte [fat12_sector_count]
     mov dl, 0
     int 0x13
     jc .error
@@ -254,13 +259,13 @@ fat_get:
     pop bx
     ret
 .error:
-    xor ax, ax
     pop ax
     pop es
     pop si
     pop dx
     pop cx
     pop bx
+    xor ax, ax
     ret
 
 fat_set:
@@ -271,54 +276,69 @@ fat_set:
     push si
     push es
     mov [cluster_temp], ax
+    mov [fat12_new_value], dx
     mov bx, ax
-    push dx
-    mov ax, ax
     shr ax, 1
     add ax, bx
-    push ax
+    mov [fat12_entry_offset], ax
     xor dx, dx
     mov cx, 512
     div cx
-    add ax, 1
+    inc ax
+    mov [fat12_sector_lba], ax
+    mov word [fat12_sector_count], 1
+    cmp dx, 511
+    jne .read_fat
+    mov word [fat12_sector_count], 2
+.read_fat:
     call lba_to_chs
     mov ax, 0x1000
     mov es, ax
     mov bx, 0x6000
     mov ah, 0x02
-    mov al, 1
+    mov al, byte [fat12_sector_count]
     mov dl, 0
     int 0x13
     jc .error
-    pop ax
+    mov ax, [fat12_entry_offset]
     and ax, 0x01FF
     mov si, 0x6000
     add si, ax
     mov ax, [si]
-    pop dx
     mov bx, [cluster_temp]
+    mov dx, [fat12_new_value]
     test bx, 1
     jnz .odd
     and ax, 0xF000
     and dx, 0x0FFF
     or ax, dx
-    jmp .write
+    jmp .write_fats
 .odd:
     and ax, 0x000F
     shl dx, 4
     and dx, 0xFFF0
     or ax, dx
-.write:
+.write_fats:
     mov [si], ax
+    mov ax, [fat12_sector_lba]
+    call lba_to_chs
     mov ax, 0x1000
     mov es, ax
     mov bx, 0x6000
-    mov ch, 0
-    mov cl, 2
-    mov dh, 0
-    mov dl, 0
     mov ah, 0x03
-    mov al, 1
+    mov al, byte [fat12_sector_count]
+    mov dl, 0
+    int 0x13
+    jc .error
+    mov ax, [fat12_sector_lba]
+    add ax, 9
+    call lba_to_chs
+    mov ax, 0x1000
+    mov es, ax
+    mov bx, 0x6000
+    mov ah, 0x03
+    mov al, byte [fat12_sector_count]
+    mov dl, 0
     int 0x13
 .error:
     pop es
@@ -328,6 +348,11 @@ fat_set:
     pop bx
     pop ax
     ret
+
+fat12_new_value dw 0
+fat12_entry_offset dw 0
+fat12_sector_lba dw 0
+fat12_sector_count dw 0
 
 lba_to_chs:
     push ax

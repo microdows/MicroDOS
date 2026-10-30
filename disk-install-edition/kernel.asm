@@ -16,7 +16,7 @@ start:
 	sti
 
     mov word [current_cluster], 0
-	mov byte [current_drive], 0
+	mov byte [current_drive], 1
 	mov byte [fat16_ready], 0
 
     ; --- INITIALISATION DU DISQUE DUR (FAT16) ---
@@ -50,10 +50,18 @@ start:
     
     mov eax, [saved_part_lba]
     call fat16_init
-	mov byte [fat16_ready], 1
+    mov byte [fat16_ready], 1
 .no_hdd:
 
+    cmp byte [fat16_ready], 1
+    je .hdd_ready
+    mov byte [current_drive], 0
+    mov si, floppy_init_path
+    jmp .set_init_path
+.hdd_ready:
+    mov byte [current_drive], 1
 	mov si, init_path
+.set_init_path:
 	mov di, current_path
 	call copy_str
 
@@ -363,9 +371,20 @@ do_mkfile:
     call resolve_path
     jc .error
     mov word [src_size], 0
+    cmp byte [current_drive], 0
+    je .create_fat12
+    mov si, [path_filename]
+    call build_fat_name
+    xor bx, bx
+    call fat16_create_file
+    cmp ax, 0xFFFF
+    je .error
+    jmp .created
+.create_fat12:
     call create_file
     cmp ax, 0xFFFF
     je .error
+.created:
     mov si, msg_mkfile_ok
     call print
     jmp .exit
@@ -384,6 +403,26 @@ do_mkfile:
 
 do_format:
 
+    mov byte [format_drive], 0xFF
+    cmp byte [buffer+7], 0
+    je .confirm
+    mov al, [buffer+7]
+    and al, 0xDF
+    cmp al, 'A'
+    je .format_a
+    cmp al, 'C'
+    je .format_c
+    jmp .error
+.format_a:
+    cmp byte [buffer+8], ':'
+    jne .error
+    mov byte [format_drive], 0
+    jmp .confirm
+.format_c:
+    cmp byte [buffer+8], ':'
+    jne .error
+    mov byte [format_drive], 1
+.confirm:
 	mov si, msg_format_warn
 	call print
 	mov ah, 0x00
@@ -395,8 +434,37 @@ do_format:
 	mov al, 10
 	int 0x10
 
+    cmp byte [format_drive], 0
+    je .format_floppy
+    cmp byte [format_drive], 1
+    jne .use_current
+    mov byte [current_drive], 1
+.use_current:
+    cmp byte [current_drive], 0
+    je .format_floppy
 	call format_hdd
 	jc .error
+    cmp byte [current_drive], 1
+    jne .formatted
+    mov eax, 2048
+    call fat16_init
+    mov byte [fat16_ready], 1
+    mov word [current_cluster], 0
+    mov byte [current_path], 'C'
+    mov byte [current_path+1], ':'
+    mov byte [current_path+2], '\'
+    mov byte [current_path+3], 0
+    jmp .formatted
+.format_floppy:
+    mov byte [current_drive], 0
+    call format_floppy
+    jc .error
+    mov word [current_cluster], 0
+    mov byte [current_path], 'A'
+    mov byte [current_path+1], ':'
+    mov byte [current_path+2], '\'
+    mov byte [current_path+3], 0
+.formatted:
 	
 	mov si, msg_format_ok
 	call print
@@ -409,32 +477,7 @@ do_format:
 	jmp main_loop
 
 do_copy:
-    mov word [parse_skip], 5
-    call parse_two_args
-    jc .error
-
-    mov si, [arg2_ptr]
-    mov al, [si]
-    and al, 0xDF
-    cmp al, 'C'
-    jne .copy_fat12
-    cmp byte [si+1], ':'
-    jne .copy_fat12
-
     call cmd_copy
-    jmp main_loop
-
-.copy_fat12:
-    call copy_file
-    cmp ax, 0xFFFF
-    je .error
-    mov si, msg_copy_ok
-    call print
-    jmp main_loop
-
-.error:
-    mov si, msg_copy_err
-    call print
     jmp main_loop
 
 do_del:
@@ -444,7 +487,15 @@ do_del:
 	jne .usage
 	call resolve_path
 	jc .error
+    cmp byte [current_drive], 0
+    je .delete_fat12
+    mov si, [path_filename]
+    call build_fat_name
+    call fat16_del_file
+    jmp .check_result
+.delete_fat12:
 	call del_file
+.check_result:
 	cmp ax, 0xFFFF
 	je .error
 	cmp ax, 0xFFFE
@@ -480,7 +531,13 @@ do_ren:
 	add si, 4
 	cmp byte [si-1], ' '
 	jne .usage
+    cmp byte [current_drive], 0
+    je .rename_fat12
+    call fat16_ren_file
+    jmp .check_result
+.rename_fat12:
 	call ren_file
+.check_result:
 	cmp ax, 0xFFFF
 	je .error
 	cmp ax, 0xFFFE
@@ -529,7 +586,15 @@ do_mkdir:
 	jne .usage
 	call resolve_path
 	jc .error
+    cmp byte [current_drive], 0
+    je .create_fat12
+    mov si, [path_filename]
+    call build_fat_name
+    call fat16_create_dir
+    jmp .check_result
+.create_fat12:
 	call mkdir_dir
+.check_result:
 	cmp ax, 0xFFFF
 	je .error
 	mov si, msg_mkdir_ok
@@ -555,7 +620,15 @@ do_rmdir:
 	jne .usage
 	call resolve_path
 	jc .error
+    cmp byte [current_drive], 0
+    je .rmdir_fat12
+    mov si, [path_filename]
+    call build_fat_name
+    call fat16_del_dir
+    jmp .check_result
+.rmdir_fat12:
 	call rmdir_dir
+.check_result:
 	cmp ax, 0xFFFF
 	je .error
 	mov si, msg_rmdir_ok
@@ -653,67 +726,9 @@ do_dir:
 
     ; --- FAT16 ---
 .dir_hdd:
-	mov eax, [lba_rootdir]
-	mov cx, 1
-	mov bx, 0x8000
-	push cs
-	pop es
-	call lba_read
-	jc .error_hdd
-	mov si, 0x8000
-	mov bp, 16
-.hdd_loop:
-	mov al, [si]
-	cmp al, 0
-	je .done_hdd
-	cmp al, 0xE5
-	je .next_hdd
-	mov al, [si+11]
-	test al, 0x08
-	jnz .next_hdd
-	test al, 0x10
-	jnz .next_hdd
-	mov di, si
-	mov cx, 8
-.print_name_hdd:
-	mov al, [di]
-	cmp al, ' '
-	je .name_done_hdd
-	mov ah, 0x0E
-	int 0x10
-	inc di
-	loop .print_name_hdd
-.name_done_hdd:
-	mov al, [si+8]
-	cmp al, ' '
-	je .no_ext_hdd
-	mov ah, 0x0E
-	mov al, '.'
-	int 0x10
-	mov di, si
-	add di, 8
-	mov cx, 3
-.print_ext_hdd:
-	mov al, [di]
-	cmp al, ' '
-	je .ext_done_hdd
-	mov ah, 0x0E
-	int 0x10
-	inc di
-	loop .print_ext_hdd
-.ext_done_hdd:
-.no_ext_hdd:
-	mov ah, 0x0E
-	mov al, 13
-	int 0x10
-	mov al, 10
-	int 0x10
-.next_hdd:
-	add si, 32
-	dec bp
-	jnz .hdd_loop
-.done_hdd:
-	jmp main_loop
+    call fat16_list_dir
+    jc .error_hdd
+    jmp main_loop
 .error_hdd:
     mov si, msg_dir_err
     call print
@@ -783,6 +798,9 @@ do_type:
 .type_hdd:
     mov si, buffer
     add si, 5
+    call resolve_path
+    jc .not_found_hdd
+    mov si, [path_filename]
     call build_fat_name
     call fat16_find_file
     jc .not_found_hdd
@@ -805,6 +823,8 @@ do_type:
     dec cx
     jmp .print_hdd
 .done_hdd:
+    mov ax, [saved_cluster]
+    mov [current_cluster], ax
     mov ah, 0x0E
     mov al, 13
     int 0x10
@@ -812,270 +832,17 @@ do_type:
     int 0x10
     jmp main_loop
 .not_found_hdd:
+    mov ax, [saved_cluster]
+    mov [current_cluster], ax
     mov si, msg_not_found
     call print
     jmp main_loop
 .read_err_hdd:
+    mov ax, [saved_cluster]
+    mov [current_cluster], ax
     mov si, msg_dir_err
     call print
     jmp main_loop
-
-; ---------- Utilitaires FAT12 ----------
-build_fat_name:
-    push si
-    push di
-    mov di, fatname
-    mov cx, 8
-.copy_name:
-    mov al, [si]
-    cmp al, '.'
-    je .pad_name
-    cmp al, 0
-    je .pad_name
-    cmp al, '\'
-    je .pad_name
-    cmp al, '/'
-    je .pad_name
-    cmp al, 'a'
-    jb .store_name
-    cmp al, 'z'
-    ja .store_name
-    sub al, 32
-.store_name:
-	mov [di], al
-	inc di
-	inc si
-	dec cx
-	jnz .copy_name
-	cmp byte [si], '.'
-	jne .copy_ext
-	inc si
-	jmp .copy_ext
-.pad_name:
-    test cx, cx
-    jz .skip_dot
-    mov byte [di], ' '
-    inc di
-    dec cx
-    jmp .pad_name
-.skip_dot:
-    cmp byte [si], '.'
-    jne .copy_ext
-    inc si
-.copy_ext:
-    mov cx, 3
-.copy_ext_loop:
-    mov al, [si]
-    cmp al, 0
-    je .pad_ext
-    cmp al, '\'
-    je .pad_ext
-    cmp al, '/'
-    je .pad_ext
-    cmp al, 'a'
-    jb .store_ext
-    cmp al, 'z'
-    ja .store_ext
-    sub al, 32
-.store_ext:
-	mov [di], al
-	inc di
-	inc si
-	dec cx
-	jnz .copy_ext_loop
-	jmp .done
-.pad_ext:
-    test cx, cx
-    jz .done
-    mov byte [di], ' '
-    inc di
-    dec cx
-    jmp .pad_ext
-.done:
-    pop di
-    pop si
-    ret
-
-find_file:
-    call load_current_dir
-    jc .err
-    mov di, 0x8000
-    mov bp, 224
-.loop:
-    mov al, [di]
-    cmp al, 0
-    je .not_found
-    cmp al, 0xE5
-    je .next
-    mov al, [di+11]
-    cmp al, 0x0F
-    je .next
-    push si
-    push di
-    mov si, fatname
-    mov cx, 11
-.cmp:
-    mov al, [si]
-    mov bl, [di]
-    cmp al, bl
-    jne .no_match
-    inc si
-    inc di
-    loop .cmp
-    pop di
-    pop si
-    mov si, di
-    clc
-    ret
-.no_match:
-    pop di
-    pop si
-.next:
-    add di, 32
-    dec bp
-    jnz .loop
-.not_found:
-    stc
-    ret
-.err:
-    stc
-    ret
-
-lba_to_chs:
-    push ax
-    push bx
-    xor dx, dx
-    mov bx, 18
-    div bx
-    mov cl, dl
-    inc cl
-    xor dx, dx
-    mov bx, 2
-    div bx
-    mov ch, al
-    mov dh, dl
-    mov dl, 0
-    pop bx
-    pop ax
-    ret
-
-fat_get:
-	push bx
-	push cx
-	push dx
-	push si
-	push es
-	mov [cluster_temp], ax
-	mov bx, ax
-	mov ax, ax
-	shr ax, 1
-	add ax, bx
-	push ax
-	xor dx, dx
-	mov cx, 512
-	div cx
-	add ax, 1
-	call lba_to_chs
-	mov ax, 0x1000
-	mov es, ax
-	mov bx, 0x6000
-	mov ah, 0x02
-	mov al, 1
-	mov dl, 0
-	int 0x13
-	jc .error
-	pop ax
-	and ax, 0x01FF
-	mov si, 0x6000
-	add si, ax
-	mov ax, [si]
-	mov bx, [cluster_temp]
-	test bx, 1
-	je .even
-	shr ax, 4
-.even:
-	and ax, 0x0FFF
-	pop es
-	pop si
-	pop dx
-	pop cx
-	pop bx
-	ret
-.error:
-	xor ax, ax
-	pop ax
-	pop es
-	pop si
-	pop dx
-	pop cx
-	pop bx
-	ret
-
-fat_set:
-	push ax
-	push bx
-	push cx
-	push dx
-	push si
-	push es
-	mov [cluster_temp], ax
-	mov bx, ax
-	push dx
-	mov ax, ax
-	shr ax, 1
-	add ax, bx
-	push ax
-	xor dx, dx
-	mov cx, 512
-	div cx
-	add ax, 1
-	call lba_to_chs
-	mov ax, 0x1000
-	mov es, ax
-	mov bx, 0x6000
-	mov ah, 0x02
-	mov al, 1
-	mov dl, 0
-	int 0x13
-	jc .error
-	pop ax
-	and ax, 0x01FF
-	mov si, 0x6000
-	add si, ax
-	mov ax, [si]
-	pop dx
-	mov bx, [cluster_temp]
-	test bx, 1
-	jnz .odd
-	and ax, 0xF000
-	and dx, 0x0FFF
-	or ax, dx
-	jmp .write
-.odd:
-	and ax, 0x000F
-	shl dx, 4
-	and dx, 0xFFF0
-	or ax, dx
-.write:
-	mov [si], ax
-	mov ax, 0x1000
-	mov es, ax
-	mov bx, 0x6000
-	mov ch, 0
-	mov cl, 2
-	mov dh, 0
-	mov dl, 0
-	mov ah, 0x03
-	mov al, 1
-	int 0x13
-.error:
-	pop es
-	pop si
-	pop dx
-	pop cx
-	pop bx
-	pop ax
-	ret
 
 fat_find_free:
 	push bx
@@ -1120,43 +887,6 @@ free_cluster_chain:
 	mov bx, cx
 	jmp .loop
 .done:
-	pop cx
-	pop bx
-	pop ax
-	ret
-
-load_current_dir:
-	push ax
-	push bx
-	push cx
-	push dx
-	push es
-	mov ax, [current_cluster]
-	test ax, ax
-	jz .root
-	add ax, 31
-	call lba_to_chs
-	jmp .load
-.root:
-	mov ch, 0
-	mov cl, 2
-	mov dh, 1
-.load:
-	mov ax, 0x1000
-	mov es, ax
-	mov bx, 0x8000
-	mov dl, 0
-	mov ah, 0x02
-	cmp word [current_cluster], 0
-	jne .one_sector
-	mov al, 14
-	jmp .do_read
-.one_sector:
-	mov al, 1
-.do_read:
-	int 0x13
-	pop es
-	pop dx
 	pop cx
 	pop bx
 	pop ax
@@ -1280,11 +1010,20 @@ chop_path:
 resolve_path:
 	push ax
 	push bx
+    push cx
+    push si
 	push di
 	push es
 	mov ax, [current_cluster]
 	mov [saved_cluster], ax
 	mov [path_filename], si
+    push cs
+    pop es
+    mov di, resolve_saved_path
+    mov si, current_path
+    mov cx, 64
+    rep movsb
+    mov si, [path_filename]
 .loop:
 	mov di, si
 .scan:
@@ -1305,15 +1044,25 @@ resolve_path:
 	mov [path_filename], si
 	jmp .loop
 .done:
+    mov si, resolve_saved_path
+    mov di, current_path
+    mov cx, 64
+    rep movsb
 	clc
 	jmp .exit
 .error:
 	mov ax, [saved_cluster]
 	mov [current_cluster], ax
+    mov si, resolve_saved_path
+    mov di, current_path
+    mov cx, 64
+    rep movsb
 	stc
 .exit:
 	pop es
 	pop di
+    pop si
+    pop cx
 	pop bx
 	pop ax
 	ret
@@ -1545,14 +1294,47 @@ cd_dir:
 	jne .normal
 	cmp byte [si+1], '.'
 	jne .normal
-	mov word [current_cluster], 0
+    cmp byte [current_drive], 0
+    je .parent_fat12
+    cmp word [current_cluster], 0
+    je .parent_root
+    mov ax, [current_cluster]
+    movzx eax, ax
+    sub eax, 2
+    movzx ebx, byte [bpb_sectors_per_cluster]
+    imul eax, ebx
+    add eax, [lba_data]
+    mov cx, 1
+    mov bx, 0x6000
+    push cs
+    pop es
+    call lba_read
+    jc .error
+    mov ax, [0x6000+32+26]
+    mov [current_cluster], ax
+    call chop_path
+    xor ax, ax
+    jmp .done
+.parent_root:
+    mov word [current_cluster], 0
+    call chop_path
+    xor ax, ax
+    jmp .done
+.parent_fat12:
+    mov word [current_cluster], 0
 	call chop_path
 	xor ax, ax
 	jmp .done
 .normal:
 	mov [path_filename], si
 	call build_fat_name
+    cmp byte [current_drive], 0
+    je .find_fat12
+    call fat16_find_file
+    jmp .check_directory
+.find_fat12:
 	call find_file
+.check_directory:
 	jc .error
 	mov al, [si + 11]
 	test al, 0x10
@@ -1645,6 +1427,8 @@ write_file:
 	mov [free_temp], ax
 	mov [src_size], bx
 	mov si, 0xA000
+	cmp word [src_size], 0
+	je .empty_file
 .write_loop:
 	mov ax, [free_temp]
 	add ax, 31
@@ -1693,6 +1477,9 @@ write_file:
 	pop bx
 	pop ax
 	ret
+.empty_file:
+	xor ax, ax
+	jmp .done
 
 parse_two_args:
 	push ax
@@ -1717,58 +1504,6 @@ parse_two_args:
 .done:
 	pop si
 	pop ax
-	ret
-
-read_file:
-	push bx
-	push cx
-	push dx
-	push si
-	push di
-	push es
-	call build_fat_name
-	call find_file
-	jc .error
-	mov ax, [si + 28]
-	mov [src_size], ax
-	mov ax, [si + 26]
-	mov [free_temp], ax
-	mov di, 0xA000
-.read_loop:
-	mov ax, [free_temp]
-	cmp ax, 0xFF8
-	jae .done
-	cmp ax, 2
-	jb .done
-	add ax, 31
-	call lba_to_chs
-	push di
-	mov ax, 0x1000
-	mov es, ax
-	mov bx, di
-	mov dl, 0
-	mov ah, 0x02
-	mov al, 1
-	int 0x13
-	pop di
-	jc .error
-	add di, 512
-	mov ax, [free_temp]
-	call fat_get
-	mov [free_temp], ax
-	jmp .read_loop
-.done:
-	xor ax, ax
-	jmp .exit
-.error:
-	mov ax, 0xFFFF
-.exit:
-	pop es
-	pop di
-	pop si
-	pop dx
-	pop cx
-	pop bx
 	ret
 
 copy_file:
@@ -1979,12 +1714,16 @@ create_file:
 	push si
 	push di
 	call build_fat_name
+	cmp word [src_size], 0
+	je .empty_file
 	call fat_find_free
 	cmp ax, 0xFFFF
 	je .error
 	mov [cluster_temp], ax
 	mov dx, 0xFFF
 	call fat_set
+	jc .error
+.find_entry:
 	call find_free_entry
 	jc .error
 	mov di, si
@@ -2000,6 +1739,9 @@ create_file:
 	pop cx
 	pop bx
 	ret
+.empty_file:
+	mov word [cluster_temp], 0
+	jmp .find_entry
 .error:
 	mov ax, 0xFFFF
 	pop di
@@ -2022,10 +1764,78 @@ print:
 do_exec:
 	push ds
 	push es
-	mov si, buffer
-	call build_com_name
-	call find_file
-	jc .not_found
+    mov ax, [current_cluster]
+    mov [exec_saved_cluster], ax
+    mov al, [current_drive]
+    mov [exec_saved_drive], al
+    mov si, current_path
+    mov di, exec_saved_path
+    mov cx, 64
+    rep movsb
+
+    mov si, buffer
+    cmp byte [si+1], ':'
+    jne .resolve_exec_path
+    mov al, [si]
+    and al, 0xDF
+    cmp al, 'C'
+    je .exec_c_prefix
+    cmp al, 'A'
+    jne .not_found
+    mov byte [current_drive], 0
+    mov word [current_cluster], 0
+    mov byte [current_path], 'A'
+    mov byte [current_path+1], ':'
+    mov byte [current_path+2], '\'
+    mov byte [current_path+3], 0
+    add si, 2
+    jmp .strip_exec_root
+.exec_c_prefix:
+    mov byte [current_drive], 1
+    mov word [current_cluster], 0
+    mov byte [current_path], 'C'
+    mov byte [current_path+1], ':'
+    mov byte [current_path+2], '\'
+    mov byte [current_path+3], 0
+    add si, 2
+.strip_exec_root:
+    cmp byte [si], '\'
+    jne .resolve_exec_path
+    inc si
+.resolve_exec_path:
+    call resolve_path
+    jc .not_found
+    mov si, [path_filename]
+    cmp byte [current_drive], 0
+    jne .exec_fat16
+    call build_com_name
+    call find_file
+    jc .not_found
+    jmp .found_fat12
+.exec_fat16:
+    mov si, [path_filename]
+    call build_com_name
+    call fat16_find_file
+    jc .not_found
+    mov ax, [si+26]
+    mov bx, [si+28]
+    mov [file_size], bx
+    call fat16_read_file
+    jc .read_err
+    push ds
+    push es
+    mov ax, 0x1000
+    mov ds, ax
+    mov si, 0xA000
+    mov ax, 0x2000
+    mov es, ax
+    mov di, 0x0100
+    mov cx, [cs:file_size]
+    rep movsb
+    pop es
+    pop ds
+    jmp .run_com
+.found_fat12:
 	mov bx, [si + 28]
 	mov [file_size], bx
 	mov ax, [si + 26]
@@ -2062,6 +1872,15 @@ do_exec:
 	mov [free_temp], ax
 	jmp .read_loop
 .read_done:
+.run_com:
+    mov ax, [exec_saved_cluster]
+    mov [current_cluster], ax
+    mov al, [exec_saved_drive]
+    mov [current_drive], al
+    mov si, exec_saved_path
+    mov di, current_path
+    mov cx, 64
+    rep movsb
 	cli
 	mov ax, 0x2000
 	mov ss, ax
@@ -2078,12 +1897,28 @@ do_exec:
 	pop ds
 	ret
 .not_found:
+    mov ax, [exec_saved_cluster]
+    mov [current_cluster], ax
+    mov al, [exec_saved_drive]
+    mov [current_drive], al
+    mov si, exec_saved_path
+    mov di, current_path
+    mov cx, 64
+    rep movsb
 	mov si, msg_unknow
 	call print
 	pop es
 	pop ds
 	ret
 .read_err:
+    mov ax, [exec_saved_cluster]
+    mov [current_cluster], ax
+    mov al, [exec_saved_drive]
+    mov [current_drive], al
+    mov si, exec_saved_path
+    mov di, current_path
+    mov cx, 64
+    rep movsb
 	mov si, msg_dir_err
 	call print
 	pop es
@@ -2091,42 +1926,14 @@ do_exec:
 	ret
 
 build_com_name:
-	push si
-	push di
-	mov di, fatname
-	mov cx, 8
-.copy_name:
-	mov al, [si]
-	cmp al, 0
-	je .pad_name
-	cmp al, ' '
-	je .pad_name
-	cmp al, 'a'
-	jb .not_lower
-	cmp al, 'z'
-	ja .not_lower
-	sub al, 32
-.not_lower:
-	mov [di], al
-	inc di
-	inc si
-	dec cx
-	jnz .copy_name
-	jmp .add_com
-.pad_name:
-	test cx, cx
-	jz .add_com
-	mov byte [di], ' '
-	inc di
-	dec cx
-	jmp .pad_name
-.add_com:
-	mov byte [di], 'C'
-	mov byte [di+1], 'O'
-	mov byte [di+2], 'M'
-	pop di
-	pop si
-	ret
+    call build_fat_name
+    cmp byte [fatname+8], ' '
+    jne .done
+    mov byte [fatname+8], 'C'
+    mov byte [fatname+9], 'O'
+    mov byte [fatname+10], 'M'
+.done:
+    ret
 
 read_line:
     mov cx, 0
@@ -2324,6 +2131,7 @@ int21_handler:
 	jmp .done
 .ah3c:
 	mov si, dx
+	mov word [src_size], 0
 	call create_file
 	cmp ax, 0xFFFF
 	je .error3c
@@ -2499,7 +2307,7 @@ int21_handler:
 	iret
 
 ; ---------- Donnees ----------
-msg_welcome  db 'MicroDOS v1.0 Classic Edition - Shell', 13, 10
+msg_welcome  db 'MicroDOS v1.0 Disk Edition - Shell', 13, 10
              db 'tapez "help" pour la liste de commandes.', 13, 10, 10, 0
 msg_prompt   db '>', 0
 msg_help     db 'Liste des Commandes', 13, 10
@@ -2524,7 +2332,7 @@ msg_help     db 'Liste des Commandes', 13, 10
              db ' mkdir <nom> - cree un dossier', 13, 10
              db ' rmdir <nom> - Suprimme un dossier', 13, 10, 0
 msg_unknow   db 'Commande inconnue. Tapez "help".', 13, 10, 0
-msg_ver      db 'MicroDOS v1.0 Classic Edition', 13, 10, 0
+msg_ver      db 'MicroDOS v1.0 Disk Edition', 13, 10, 0
 msg_reboot   db 'Redemarrage en cours...', 13, 10, 0
 msg_rebootdos db 'Redemarrage de MicroDOS...', 13, 10, 0
 msg_dir_err  db 'Erreur lecture disque.', 13, 10, 0
@@ -2605,12 +2413,18 @@ open_files times 5*8 db 0
 dir_entry_addr dw 0
 saved_cluster dw 0
 path_filename dw 0
+resolve_saved_path times 64 db 0
 current_path times 64 db 0
-init_path db 'A:\', 0
+init_path db 'C:\', 0
 buffer       times 256 db 0
 current_drive db 0
 saved_part_lba dd 0
 fat16_ready db 0
+format_drive db 0xFF
+exec_saved_drive db 0
+exec_saved_cluster dw 0
+exec_saved_path times 64 db 0
+floppy_init_path db 'A:\', 0
 
 %include "lba.inc"
 %include "lba_write.inc"
@@ -2621,8 +2435,14 @@ fat16_ready db 0
 %include "fat16_set.inc"
 %include "fat16_find_free.inc"
 %include "fat16_find_file.inc"
+%include "fat16_dir.inc"
 %include "fat16_read_file.inc"
 %include "fat16_write_file.inc"
 %include "fat16_create_file.inc"
+%include "fat16_create_dir.inc"
+%include "fat16_del_file.inc"
+%include "fat16_ren_file.inc"
 %include "cmd_copy.inc"
 %include "format.inc"
+%include "format_floppy.inc"
+%include "fat12.inc"

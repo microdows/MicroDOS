@@ -1,6 +1,10 @@
 [BITS 16]
 [ORG 0x7C00]
 
+%ifndef KERNEL_SECTORS
+%define KERNEL_SECTORS 48
+%endif
+
 	jmp short start
 	nop
 
@@ -41,14 +45,37 @@ start:
 	mov es, ax
 	xor bx, bx
 
-	mov ah, 0x02
-	mov al, 20
 	mov ch, 0
-	mov cl, 16
 	mov dh, 1
+	mov cl, 16
+	mov bp, KERNEL_SECTORS
+.read_kernel:
+	push bp
+	mov ah, 0x02
+	mov al, 1
 	mov dl, 0
 	int 0x13
+	pop bp
 	jc error
+	add bx, 512
+	jnc .next_sector
+	mov ax, es
+	add ax, 0x1000
+	mov es, ax
+	xor bx, bx
+.next_sector:
+	inc cl
+	cmp cl, 19
+	jb .count_sector
+	mov cl, 1
+	inc dh
+	cmp dh, 2
+	jb .count_sector
+	mov dh, 0
+	inc ch
+.count_sector:
+	dec bp
+	jnz .read_kernel
 	jmp 0x1000:0000
 
 error:
@@ -72,4 +99,3 @@ msg_error db 'Erreur de Lecture!', 13, 10, 0
 
 times 510-($-$$) db 0
 dw 0xAA55
-

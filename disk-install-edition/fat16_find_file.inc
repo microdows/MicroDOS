@@ -1,97 +1,136 @@
 ; ============================================
-; fat16_find_file.inc - Chercher un fichier FAT16
+; fat16_find_file.inc - Chercher dans le répertoire FAT16 courant
 ; ============================================
 
 fat16_sector_lba   dd 0
-fat16_sectors_left dw 0
+fat16_cluster      dw 0
+fat16_sector_index db 0
+fat16_entries_left dw 0
 
 fat16_find_file:
     push bx
     push cx
     push dx
-    push si
     push di
-    push ds
+    push es
 
-    push ds
-    pop es
+    mov ax, [current_cluster]
+    mov [fat16_cluster], ax
+    cmp ax, 0
+    jne .cluster_dir
 
-    ; Nombre de secteurs du root directory (root_entries / 16)
     mov ax, [bpb_root_entries]
-    shr ax, 4
-    mov [fat16_sectors_left], ax
-
-    ; LBA de départ du root directory
+    mov [fat16_entries_left], ax
     mov eax, [lba_rootdir]
     mov [fat16_sector_lba], eax
+    mov byte [fat16_sector_index], 0
+    jmp .read_sector
 
-.sector_loop:
-    ; Lire 1 secteur du répertoire dans le buffer 0x6000
+.cluster_dir:
+    mov byte [fat16_sector_index], 0
+    call .cluster_to_lba
+    mov [fat16_sector_lba], eax
+    movzx ax, byte [bpb_sectors_per_cluster]
+    shl ax, 4
+    mov [fat16_entries_left], ax
+
+.read_sector:
     mov eax, [fat16_sector_lba]
     mov cx, 1
     mov bx, 0x6000
+    push cs
+    pop es
     call lba_read
     jc .not_found
 
     mov si, 0x6000
     mov cx, 16
-
 .entry_loop:
-    ; Entrée vide = fin du répertoire
     cmp byte [si], 0
     je .not_found
-
-    ; Entrée supprimée = passer à la suivante
     cmp byte [si], 0xE5
     je .next_entry
+    cmp byte [si+11], 0x0F
+    je .next_entry
+    test byte [si+11], 0x08
+    jnz .next_entry
 
-    ; Comparaison des 11 caractères
     push cx
     push si
     mov di, fatname
     mov cx, 11
-
-.cmp_loop:
+.compare:
     mov al, [si]
     cmp al, [di]
     jne .no_match
     inc si
     inc di
-    loop .cmp_loop
-
-    ; --- TROUVÉ ---
-    pop si      ; Ignore le SI de la boucle
-    pop cx      ; Restaure CX de la boucle
-    pop ds      ; Restaure DS
-    pop di      ; Restaure DI
-    add sp, 2   ; Saute le push si (on veut GARDER SI pointant sur l'entrée !)
-    pop dx      ; Restaure DX
-    pop cx      ; Restaure CX
-    pop bx      ; Restaure BX
+    loop .compare
+    pop si
+    pop cx
+    pop es
+    pop di
+    pop dx
+    pop cx
+    pop bx
     clc
     ret
 
 .no_match:
     pop si
     pop cx
-
 .next_entry:
     add si, 32
+    cmp word [fat16_cluster], 0
+    jne .continue_entries
+    dec word [fat16_entries_left]
+    jz .not_found
+.continue_entries:
     loop .entry_loop
 
-    ; Secteur suivant
-    mov eax, [fat16_sector_lba]
-    inc eax
+    inc dword [fat16_sector_lba]
+    inc byte [fat16_sector_index]
+    cmp word [fat16_cluster], 0
+    je .root_sector_limit
+    mov al, [fat16_sector_index]
+    cmp al, [bpb_sectors_per_cluster]
+    jb .read_sector
+
+    mov ax, [fat16_cluster]
+    call fat16_get
+    jc .not_found
+    cmp ax, 0xFFF8
+    jae .not_found
+    cmp ax, 2
+    jb .not_found
+    cmp ax, 0xFFF0
+    jae .not_found
+    mov [fat16_cluster], ax
+    mov byte [fat16_sector_index], 0
+    call .cluster_to_lba
     mov [fat16_sector_lba], eax
-    dec word [fat16_sectors_left]
-    jnz .sector_loop
+    movzx ax, byte [bpb_sectors_per_cluster]
+    shl ax, 4
+    mov [fat16_entries_left], ax
+    jmp .read_sector
+
+.root_sector_limit:
+    cmp word [fat16_entries_left], 0
+    jne .read_sector
 
 .not_found:
-    pop ds
+    pop es
     pop di
-    pop si
     pop dx
     pop cx
     pop bx
     stc
+    ret
+
+.cluster_to_lba:
+    movzx eax, word [fat16_cluster]
+    sub eax, 2
+    movzx ebx, byte [bpb_sectors_per_cluster]
+    imul eax, ebx
+    add eax, [lba_data]
     ret
