@@ -901,7 +901,7 @@ find_free_handle:
 .loop:
 	cmp byte [di+6], 0
 	je .found
-	add di, 8
+	add di, 16
 	inc bx
 	loop .loop
 	mov ax, 0xFFFF
@@ -919,7 +919,7 @@ find_handle:
 	cmp ax, 10
 	jae .error
 	sub ax, 5
-	shl ax, 3
+	shl ax, 4
 	mov di, open_files
 	add di, ax
 	clc
@@ -1806,6 +1806,18 @@ do_exec:
     call resolve_path
     jc .not_found
     mov si, [path_filename]
+    call build_exe_name
+    cmp byte [current_drive], 0
+    jne .find_exe_fat16
+    call find_file
+    jc .try_com
+    jmp .found_exe
+.find_exe_fat16:
+    call fat16_find_file
+    jc .try_com
+    jmp .found_exe
+.try_com:
+    mov si, [path_filename]
     cmp byte [current_drive], 0
     jne .exec_fat16
     call build_com_name
@@ -1834,7 +1846,7 @@ do_exec:
     rep movsb
     pop es
     pop ds
-    jmp .run_com
+    jmp .restore_exec_state
 .found_fat12:
 	mov bx, [si + 28]
 	mov [file_size], bx
@@ -1892,6 +1904,20 @@ do_exec:
 	mov ds, ax
 	mov es, ax
 	jmp 0x2000:0x100
+.found_exe:
+	call exec_exe
+.restore_exec_state:
+	mov ax, [exec_saved_cluster]
+	mov [current_cluster], ax
+	mov al, [exec_saved_drive]
+	mov [current_drive], al
+	mov si, exec_saved_path
+	mov di, current_path
+	mov cx, 64
+	rep movsb
+	pop es
+	pop ds
+	ret
 .ret_from_com:
 	pop es
 	pop ds
@@ -1927,12 +1953,314 @@ do_exec:
 
 build_com_name:
     call build_fat_name
-    cmp byte [fatname+8], ' '
-    jne .done
     mov byte [fatname+8], 'C'
     mov byte [fatname+9], 'O'
     mov byte [fatname+10], 'M'
 .done:
+    ret
+
+build_exe_name:
+    call build_fat_name
+    mov byte [fatname+8], 'E'
+    mov byte [fatname+9], 'X'
+    mov byte [fatname+10], 'E'
+.done:
+    ret
+
+load_exe_source:
+    push bx
+    push cx
+    push dx
+    push si
+    push di
+    push es
+
+    mov ax, [si+28]
+    mov [src_size], ax
+    test ax, ax
+    jz .error
+    mov cx, ax
+    shr ax, 9
+    and cx, 0x01FF
+    jz .sector_count_ready
+    inc ax
+.sector_count_ready:
+    mov [exe_source_sectors], ax
+    mov ax, [si+26]
+    cmp ax, 2
+    jb .error
+    mov [exe_source_cluster], ax
+    mov word [exe_source_offset], 0
+    mov byte [exe_source_sector_index], 0
+
+.read_sector:
+    mov ax, [exe_source_cluster]
+    cmp byte [current_drive], 0
+    jne .read_fat16
+
+    add ax, 31
+    xor bx, bx
+    mov bl, [exe_source_sector_index]
+    add ax, bx
+    call lba_to_chs
+    mov ax, 0x3000
+    mov es, ax
+    mov bx, [exe_source_offset]
+    mov dl, 0
+    mov ah, 0x02
+    mov al, 1
+    int 0x13
+    jc .error
+    jmp .sector_read
+
+.read_fat16:
+    mov ax, 0x3000
+    mov es, ax
+    movzx eax, word [exe_source_cluster]
+    sub eax, 2
+    movzx ebx, byte [bpb_sectors_per_cluster]
+    imul eax, ebx
+    add eax, [lba_data]
+    movzx ebx, byte [exe_source_sector_index]
+    add eax, ebx
+    mov cx, 1
+    mov bx, [exe_source_offset]
+    call lba_read
+    jc .error
+
+.sector_read:
+    add word [exe_source_offset], 512
+    dec word [exe_source_sectors]
+    jz .done
+
+    cmp byte [current_drive], 0
+    jne .advance_fat16
+    mov ax, [exe_source_cluster]
+    call fat_get
+    cmp ax, 2
+    jb .error
+    cmp ax, 0x0FF8
+    jae .error
+    mov [exe_source_cluster], ax
+    jmp .read_sector
+
+.advance_fat16:
+    inc byte [exe_source_sector_index]
+    mov al, [exe_source_sector_index]
+    cmp al, [bpb_sectors_per_cluster]
+    jb .read_sector
+    mov byte [exe_source_sector_index], 0
+    mov ax, [exe_source_cluster]
+    call fat16_get
+    jc .error
+    cmp ax, 2
+    jb .error
+    cmp ax, 0xFFF0
+    jae .error
+    mov [exe_source_cluster], ax
+    jmp .read_sector
+
+.done:
+    xor ax, ax
+    clc
+    jmp .exit
+
+.error:
+    mov ax, 0xFFFF
+    stc
+.exit:
+    pop es
+    pop di
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    ret
+
+dos_read_data_sector:
+    push ax
+    push bx
+    push cx
+    push dx
+    push es
+    cmp byte [dos_io_drive], 0
+    jne .read_fat16
+    add ax, 31
+    add ax, [dos_io_sector_index]
+    call lba_to_chs
+    mov ax, 0x1000
+    mov es, ax
+    mov bx, 0xA000
+    mov dl, 0
+    mov ah, 0x02
+    mov al, 1
+    int 0x13
+    jc .read_error
+    jmp .read_done
+.read_fat16:
+    movzx eax, ax
+    sub eax, 2
+    movzx ebx, byte [bpb_sectors_per_cluster]
+    imul eax, ebx
+    add eax, [lba_data]
+    movzx ebx, word [dos_io_sector_index]
+    add eax, ebx
+    push eax
+    mov ax, 0x1000
+    mov es, ax
+    pop eax
+    mov cx, 1
+    mov bx, 0xA000
+    call lba_read
+    jc .read_error
+.read_done:
+    pop es
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    clc
+    ret
+.read_error:
+    pop es
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    stc
+    ret
+
+dos_write_data_sector:
+    push ax
+    push bx
+    push cx
+    push dx
+    push es
+    cmp byte [dos_io_drive], 0
+    jne .write_fat16
+    add ax, 31
+    add ax, [dos_io_sector_index]
+    call lba_to_chs
+    mov ax, 0x1000
+    mov es, ax
+    mov bx, 0xA000
+    mov dl, 0
+    mov ah, 0x03
+    mov al, 1
+    int 0x13
+    jc .write_error
+    jmp .write_done
+.write_fat16:
+    movzx eax, ax
+    sub eax, 2
+    movzx ebx, byte [bpb_sectors_per_cluster]
+    imul eax, ebx
+    add eax, [lba_data]
+    movzx ebx, word [dos_io_sector_index]
+    add eax, ebx
+    push eax
+    mov ax, 0x1000
+    mov es, ax
+    pop eax
+    mov cx, 1
+    mov bx, 0xA000
+    call lba_write
+    jc .write_error
+.write_done:
+    pop es
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    clc
+    ret
+.write_error:
+    pop es
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    stc
+    ret
+
+dos_advance_data_cluster:
+    cmp byte [dos_io_drive], 0
+    jne .advance_fat16
+    mov ax, [dos_io_cluster]
+    call fat_get
+    cmp ax, 2
+    jb .invalid
+    cmp ax, 0x0FF8
+    jae .invalid
+    mov [dos_io_cluster], ax
+    mov word [dos_io_sector_index], 0
+    clc
+    ret
+.advance_fat16:
+    inc word [dos_io_sector_index]
+    mov al, [dos_io_sector_index]
+    cmp al, [bpb_sectors_per_cluster]
+    jb .same_cluster
+    mov word [dos_io_sector_index], 0
+    mov ax, [dos_io_cluster]
+    call fat16_get
+    jc .invalid
+    cmp ax, 2
+    jb .invalid
+    cmp ax, 0xFFF0
+    jae .invalid
+    mov [dos_io_cluster], ax
+.same_cluster:
+    clc
+    ret
+.invalid:
+    stc
+    ret
+
+dos_update_file_size:
+    mov di, [dos_io_handle]
+    cmp byte [di+7], 0
+    jne .fat16
+    mov ax, [dos_io_count]
+    mov [di+4], ax
+    mov si, [di+2]
+    call save_current_dir
+    clc
+    ret
+
+.fat16:
+    mov ax, 0x1000
+    mov es, ax
+    mov bx, 0xA000
+    mov eax, [di+8]
+    mov cx, 1
+    call lba_read
+    jc .error
+
+    mov di, [dos_io_handle]
+    mov bx, [di+12]
+    add bx, 28
+    mov ax, [dos_io_count]
+    mov [es:bx], ax
+    mov word [es:bx+2], 0
+
+    mov di, [dos_io_handle]
+    mov ax, 0x1000
+    mov es, ax
+    mov bx, 0xA000
+    mov eax, [di+8]
+    mov cx, 1
+    call lba_write
+    jc .error
+
+    mov di, [dos_io_handle]
+    mov ax, [dos_io_count]
+    mov [di+4], ax
+    clc
+    ret
+
+.error:
+    stc
     ret
 
 read_line:
@@ -2007,7 +2335,6 @@ push di
 
 int21_handler:
 	sti
-	push ax
 	push bx
 	push cx
 	push si
@@ -2015,6 +2342,7 @@ int21_handler:
 	push di
 	push ds
 	push es
+	push bp
 	mov [cs:saved_user_ds], ds
 	push cs
 	pop ds
@@ -2022,8 +2350,12 @@ int21_handler:
 	je .ah09
 	cmp ah, 0x02
 	je .ah02
+	cmp ah, 0x06
+	je dos_ah06
+	cmp ah, 0x07
+	je dos_ah07
 	cmp ah, 0x4C
-	je .ah4c
+	je memory_ah4c
 	cmp ah, 0x30
 	je .ah30
 	cmp ah, 0x0B
@@ -2039,7 +2371,7 @@ int21_handler:
 	cmp ah, 0x0F
 	je .ah0f
 	cmp ah, 0x25
-	je .ah25
+	je dos_ah25
 	cmp ah, 0x35
 	je .ah35
 	cmp ah, 0x3C
@@ -2049,9 +2381,15 @@ int21_handler:
 	cmp ah, 0x3E
 	je .ah3e
 	cmp ah, 0x3F
-	je .ah3f
+	je dos_ah3f
 	cmp ah, 0x40
-	je .ah40
+	je dos_ah40
+	cmp ah, 0x48
+	je memory_ah48
+	cmp ah, 0x49
+	je memory_ah49
+	cmp ah, 0x4A
+	je memory_ah4a
 	jmp .done
 .ah09:
 	mov ax, [saved_user_ds]
@@ -2098,22 +2436,9 @@ int21_handler:
 	int 0x1A
 	jmp .done
 .ah00:
-	jmp .ah4c
+	jmp memory_ah4c
 .ah0f:
 	xor al, al
-	jmp .done
-.ah25:
-	push ds
-	push ax
-	xor ax, ax
-	pop ax
-	mov bl, al
-	xor bh, bh
-	shl bx, 1
-	shl bx, 1
-	mov [bx], dx
-	pop ax
-	mov [bx+2], ax
 	jmp .done
 .ah35:
 	push ds
@@ -2143,8 +2468,15 @@ int21_handler:
 .ah3d:
 	mov si, dx
 	call build_fat_name
+	cmp byte [current_drive], 0
+	jne .open_fat16
 	call find_file
 	jc .error3d
+	jmp .found_file3d
+.open_fat16:
+	call fat16_find_file
+	jc .error3d
+.found_file3d:
 	mov al, [si + 11]
 	test al, 0x10
 	jnz .error3d
@@ -2161,6 +2493,20 @@ int21_handler:
 	mov bx, [si + 28]
 	mov [di+4], bx
 	mov byte [di+6], 1
+	mov al, [current_drive]
+	mov [di+7], al
+	mov dword [di+8], 0
+	mov word [di+12], 0
+	mov word [di+14], 0
+	cmp byte [current_drive], 0
+	je .handle_ready
+	push ax
+	mov eax, [fat16_found_dir_lba]
+	mov [di+8], eax
+	mov ax, [fat16_found_dir_offset]
+	mov [di+12], ax
+	pop ax
+.handle_ready:
 	clc
 	jmp .done
 .error3d:
@@ -2179,123 +2525,8 @@ int21_handler:
 	mov ax, 0x0006
 	stc
 	jmp .done
-.ah3f:
-    push bx
-    push cx
-    push dx
-    push si
-    push di
-    push bp
-    push es
-    mov [ah3f_count], cx
-    mov [ah3f_buffer], dx
-    mov ax, bx
-    call find_handle
-    jc .error3f
-    mov bx, [di]
-    mov ax, bx
-    add ax, 31
-    call lba_to_chs
-    mov ax, 0x1000
-    mov es, ax
-    mov bx, 0xA000
-    mov dl, 0
-    mov ah, 0x02
-    mov al, 1
-    int 0x13
-    jc .error3f
-    push ds
-    pop es
-    mov si, 0xA000
-    mov di, [ah3f_buffer]
-    mov bp, [ah3f_count]
-.copy_loop:
-    test bp, bp
-    jz .done3f
-    mov al, [si]
-    mov [di], al
-    inc si
-    inc di
-    dec bp
-    jmp .copy_loop
-.done3f:
-    mov ax, [ah3f_count]
-    clc
-    jmp .done
-.error3f:
-    mov ax, 0x0006
-    stc
-    jmp .done
-.ah40:
-	mov [ah40_user_ds], ds
-	mov [ah40_buffer], dx
-	mov [ah40_count], cx
-	push cs
-	pop ds
-	mov ax, bx
-	call find_handle
-	jc .error40
-	mov ax, [di]
-	mov [ah40_cluster], ax
-	mov ax, [di+2]
-	mov [ah40_dir_entry], ax
-	mov ax, [ah40_user_ds]
-	mov es, ax
-	mov si, [ah40_buffer]
-	mov di, 0xA000
-	mov cx, [ah40_count]
-	cmp cx, 512
-	jbe .copy_loop
-	mov cx, 512
-.copy_loop40:
-	jcxz .write_cluster
-	mov al, [es:si]
-	mov [di], al
-	inc si
-	inc di
-	dec cx
-	jmp .copy_loop40
-.write_cluster:
-	push ds
-	pop es
-	mov ax, [ah40_cluster]
-	add ax, 31
-	call lba_to_chs
-	mov bx, 0xA000
-	mov ah, 0x03
-	mov al, 1
-	mov dl, 0
-	int 0x13
-	jc .error40
-	push ax
-	xor ax, ax
-	mov dl, 0
-	int 0x13
-	pop ax
-	mov si, [ah40_dir_entry]
-	mov ax, [ah40_count]
-	mov [si+28], ax
-	mov word [si+30], 0
-	call save_current_dir
-	mov ax, [ah40_count]
-	clc
-	jmp .done
-.error40:
-	mov ax, 0x0005
-	stc
-	jmp .done
-.ah4c:
-	pop es
-	pop ds
-	pop di
-	pop dx
-	pop si
-	pop cx
-	pop bx
-	pop ax
-	add sp, 6
-	retf
 .done:
+	pop bp
 	pop es
 	pop ds
 	pop di
@@ -2303,18 +2534,17 @@ int21_handler:
 	pop si
 	pop cx
 	pop bx
-	pop ax
 	iret
 
 ; ---------- Donnees ----------
-msg_welcome  db 'MicroDOS v1.0 Disk Edition - Shell', 13, 10
+msg_welcome  db 'MicroDOS v1.1.0 Disk Edition - Shell', 13, 10
              db 'tapez "help" pour la liste de commandes.', 13, 10, 10, 0
 msg_prompt   db '>', 0
 msg_help     db 'Liste des Commandes', 13, 10
              db ' help - cette aide', 13, 10
              db ' dir - liste les fichiers', 13, 10
              db ' type - affiche un fichier', 13, 10
-             db ' <programme> - execute un fichier .COM', 13, 10
+             db ' <programme> - execute un fichier .COM ou .EXE', 13, 10
              db ' reset - reinitialise la disquette', 13, 10
              db ' cls - efface l ecran', 13, 10
              db ' ver - version', 13, 10
@@ -2332,7 +2562,7 @@ msg_help     db 'Liste des Commandes', 13, 10
              db ' mkdir <nom> - cree un dossier', 13, 10
              db ' rmdir <nom> - Suprimme un dossier', 13, 10, 0
 msg_unknow   db 'Commande inconnue. Tapez "help".', 13, 10, 0
-msg_ver      db 'MicroDOS v1.0 Disk Edition', 13, 10, 0
+msg_ver      db 'MicroDOS v1.1.0 Disk Edition', 13, 10, 0
 msg_reboot   db 'Redemarrage en cours...', 13, 10, 0
 msg_rebootdos db 'Redemarrage de MicroDOS...', 13, 10, 0
 msg_dir_err  db 'Erreur lecture disque.', 13, 10, 0
@@ -2399,17 +2629,10 @@ src_size dw 0
 parse_skip dw 5
 free_temp dw 0
 current_cluster dw 0
-ah3f_count dw 0
-ah40_user_ds dw 0
-ah40_buffer dw 0
-ah40_count dw 0
-ah40_cluster dw 0
-ah40_dir_entry dw 0
-ah3f_buffer dw 0
 saved_user_ds dw 0
 
 temp_name times 64 db 0
-open_files times 5*8 db 0
+open_files times 5*16 db 0
 dir_entry_addr dw 0
 saved_cluster dw 0
 path_filename dw 0
@@ -2425,6 +2648,10 @@ exec_saved_drive db 0
 exec_saved_cluster dw 0
 exec_saved_path times 64 db 0
 floppy_init_path db 'A:\', 0
+exe_source_cluster dw 0
+exe_source_offset dw 0
+exe_source_sectors dw 0
+exe_source_sector_index db 0
 
 %include "lba.inc"
 %include "lba_write.inc"
@@ -2446,3 +2673,6 @@ floppy_init_path db 'A:\', 0
 %include "format.inc"
 %include "format_floppy.inc"
 %include "fat12.inc"
+%include "int21_ext.inc"
+%include "memory.inc"
+%include "exec_exe.inc"
