@@ -123,6 +123,16 @@ main_loop:
     call strcmp
     jc do_rmdir
 
+	mov si, buffer
+	mov di, cmd_label
+	call strcmp
+	jc do_label
+
+	mov si, buffer
+	mov di, cmd_vol
+	call strcmp
+	jc do_vol
+
     mov si, buffer
     mov di, cmd_rebootdos
     call strcmp
@@ -528,6 +538,153 @@ do_rmdir:
         mov ax, [saved_cluster]
         mov [current_cluster], ax
         jmp main_loop
+
+do_label:
+
+	mov si, buffer
+	add si, 6
+	cmp byte [si-1], ' '
+	jne .usage
+
+	;--lire le secteur de boot--
+
+	xor ax , ax
+	call lba_to_chs
+	mov ax, 0x1000
+	mov es, ax
+	mov bx, 0xA000
+	mov ah, 0x02
+	mov al, 1
+	mov dl, 0
+	int 0x13
+	jc .read_error
+
+	;--prepare le nouveau nom (11 caractere max)--
+
+	mov di, 0xA000
+	add di, 43
+	mov cx, 11
+
+.format_name:
+
+	mov al, [si]
+	cmp al, 0
+	je .fill_space
+	cmp al, ' '
+	je .fill_space
+	cmp al, 'a'
+	jb .sotre_char
+	cmp al, 'z'
+	ja .sotre_char
+	sub al, 32
+
+.sotre_char:
+
+	mov [di], al
+	inc di
+	inc si
+	dec cx
+	jnz .format_name
+	jmp .write_sector 
+
+.fill_space:
+
+	mov byte [di], ' '
+	inc di
+	dec cx
+	jnz .write_sector
+
+.write_sector:
+
+	;--réecrire le boot_sector (lba0)--
+
+	xor ax, ax
+	call lba_to_chs
+	mov ax, 0x1000
+	mov es, ax
+	mov bx, 0xA000
+	mov ah, 0x03
+	mov al, 1
+	mov dl, 0
+	int 0x13
+	jc .write_error
+
+	;--Succes--
+
+	mov si, msg_label_ok
+	call print
+	jmp main_loop
+
+
+
+.read_error:
+
+	mov si, msg_label_err
+	call print
+	jmp main_loop
+
+.write_error:
+
+	;--affiche l'erreur si l'ecriture echoue--
+
+	mov si, msg_label_err
+	call print
+	jmp main_loop
+
+.usage:
+
+	mov si, msg_label_usage
+	call print
+	jmp main_loop
+
+do_vol:
+
+	;--lire le boot_sector--
+
+		;--lire le secteur de boot--
+
+	xor ax , ax
+	call lba_to_chs
+	mov ax, 0x1000
+	mov es, ax
+	mov bx, 0xA000
+	mov ah, 0x02
+	mov al, 1
+	mov dl, 0
+	push ds
+	int 0x13
+	pop ds 
+	jc .read_error
+
+	;--affiche le nom--
+
+	mov si, msg_vol_name
+	call print
+
+	mov si, 0xA000
+	add si, 43
+	mov cx, 11
+
+.print_vol:
+
+	mov al, [si]
+	mov ah, 0x0E
+	int 0x10
+	inc si
+	loop .print_vol
+
+	mov ah, 0x0E
+	mov al, 13
+	int 0x10
+	mov al, 10
+	int 0x10
+	jmp main_loop
+
+.read_error:
+
+	mov si, msg_vol_err
+	call print
+	jmp main_loop
 
 
 ; ---------- DIR ----------
@@ -2829,6 +2986,9 @@ int21_handler:
 	mov [di+4], bx
 	mov byte [di+6], 1
 	mov byte [di+7], 0
+	mov dword [di+8], 0
+	mov word [di+12], 0
+	mov word [di+14], 0
 
 	clc
 	jmp .done
@@ -2987,7 +3147,9 @@ msg_help     db 'Liste des Commandes', 13, 10
 	     db ' ren <ANCIEN NOM> <NOUVEAU NOM> - renomme un fichier', 13, 10
              db ' cd - Change de Repectoire', 13, 10
              db ' mkdir <nom> - cree un dossier', 13, 10
-             db ' rmdir <nom> - Suprimme un dossier', 13, 10, 0
+             db ' rmdir <nom> - Suprimme un dossier', 13, 10
+			 db ' label <nom> - Renomme une disquette', 13, 10
+			 db ' vol - Affiche le nom du volume', 13, 10, 0
 msg_unknow   db 'Commande inconnue. Tapez "help".', 13, 10, 0
 msg_ver      db 'MicroDOS v1.1.0 Classic Edition', 13, 10, 0
 msg_reboot   db 'Redemarrage en cours...', 13, 10, 0
@@ -3021,6 +3183,11 @@ msg_rmdir_ok db 'Dossier suprime.', 13, 10, 0
 msg_rmdir_err db 'Erreur de suppression', 13, 10, 0
 msg_rmdir_usage db 'rmdir <NOM DU DOSSIER>', 13, 10, 0
 msg_dir_tag db ' <DIR>', 0
+msg_label_ok db 'Disquette renomme avec succes', 13, 10, 0
+msg_label_usage db 'Usage : label <NOM>', 13, 10, 0
+msg_label_err db 'Erreur de renomage', 0
+msg_vol_name db 'Le nom du volume est : ', 0
+msg_vol_err db 'Impossible de lire le nom du volume', 0
 
 cmd_help     db 'help', 0
 cmd_dir      db 'dir', 0
@@ -3042,6 +3209,8 @@ cmd_ren db 'ren', 0
 cmd_cd db 'cd', 0
 cmd_mkdir db 'mkdir', 0
 cmd_rmdir db 'rmdir', 0
+cmd_label db 'label', 0
+cmd_vol db 'vol', 0
 
 
 fatname      times 11 db 0
@@ -3068,6 +3237,6 @@ current_path times 64 db 0
 init_path db 'A:\', 0
 buffer       times 256 db 0
 
-%include "../../disk/int21_ext.inc"
-%include "../../disk/memory.inc"
-%include "../../disk/exec_exe.inc"
+%include "int21_ext.inc"
+%include "memory.inc"
+%include "exec_exe.inc"
