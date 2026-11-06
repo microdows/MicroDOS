@@ -133,6 +133,16 @@ main_loop:
 	call strcmp
 	jc do_vol
 
+	mov si, buffer
+	mov di, cmd_drive_a
+	call strcmp
+	jc do_drive_a
+
+	mov si, buffer
+	mov di, cmd_drive_b
+	call strcmp
+	jc do_drive_b
+
     mov si, buffer
     mov di, cmd_rebootdos
     call strcmp
@@ -177,7 +187,7 @@ do_rebootdos:
 
 do_reset:
 	mov ah, 0x00
-	mov dl, 0
+	mov dl, [cs:current_drive]
 	int 0x13
 	mov si, msg_reset
 	call print
@@ -555,7 +565,7 @@ do_label:
 	mov bx, 0xA000
 	mov ah, 0x02
 	mov al, 1
-	mov dl, 0
+	mov dl, [cs:current_drive]
 	int 0x13
 	jc .read_error
 
@@ -605,7 +615,7 @@ do_label:
 	mov bx, 0xA000
 	mov ah, 0x03
 	mov al, 1
-	mov dl, 0
+	mov dl, [cs:current_drive]
 	int 0x13
 	jc .write_error
 
@@ -650,7 +660,7 @@ do_vol:
 	mov bx, 0xA000
 	mov ah, 0x02
 	mov al, 1
-	mov dl, 0
+	mov dl, [cs:current_drive]
 	push ds
 	int 0x13
 	pop ds 
@@ -686,6 +696,39 @@ do_vol:
 	call print
 	jmp main_loop
 
+do_drive_a:
+
+	mov byte [current_drive], 0
+	jmp change_drive
+
+do_drive_b:
+
+mov byte [current_drive], 1
+
+change_drive:
+
+	mov ah, 0x00
+	mov dl, [current_drive]
+	int 0x13
+	jnc .ok
+
+	mov byte [current_drive], 0
+	mov si, msg_drive_err
+	call print
+	jmp main_loop
+
+.ok:
+
+	mov word [current_cluster], 0
+
+	mov si, init_path
+	mov di, current_path
+	call copy_str
+
+	mov al, [current_drive]
+	add al, 'A'
+	mov [current_path], al
+	jmp main_loop
 
 ; ---------- DIR ----------
 do_dir:
@@ -993,7 +1036,7 @@ lba_to_chs:
     div bx
     mov ch, al
     mov dh, dl
-    mov dl, 0
+    mov dl, [cs:current_drive]
 
     pop bx
     pop ax
@@ -1030,7 +1073,7 @@ fat_get:
 	mov ah, 0x02
 	; Une entree FAT12 peut chevaucher deux secteurs.
 	mov al, 2
-	mov dl, 0
+	mov dl, [cs:current_drive]
 	int 0x13
 	jc .error
 
@@ -1098,7 +1141,7 @@ fat_set:
 	mov bx, 0x6000
 	mov ah, 0x02
 	mov al, 1
-	mov dl, 0
+	mov dl, [cs:current_drive]
 	int 0x13
 	jc .error
 
@@ -1134,7 +1177,7 @@ fat_set:
 	mov ch, 0
 	mov cl, 2
 	mov dh, 0
-	mov dl, 0
+	mov dl, [cs:current_drive]
 	mov ah, 0x03
 	mov al, 1
 	int 0x13
@@ -1247,7 +1290,7 @@ load_current_dir:
 	mov ax, 0x1000
 	mov es, ax
 	mov bx, 0x8000
-	mov dl, 0
+	mov dl, [cs:current_drive]
 	mov ah, 0x02
 
 	cmp word [current_cluster], 0
@@ -1530,13 +1573,13 @@ save_current_dir:
 
 .do_write:
 
-	mov dl, 0
+	mov dl, [cs:current_drive]
 	mov ah, 0x03
 	int 0x13
 
 	push ax
 	xor ax, ax
-	mov dl, 0
+	mov dl, [cs:current_drive]
 	int 0x13
 	pop ax
 
@@ -1695,14 +1738,14 @@ init_new_dir:
 	mov ax, 0x1000
 	mov es, ax
 	mov bx, 0xA000
-	mov dl, 0
+	mov dl, [cs:current_drive]
 	mov ah, 0x03
 	mov al, 1
 	int 0x13
 
 	push ax
 	xor ax, ax
-	mov dl, 0
+	mov dl, [cs:current_drive]
 	int 0x13
 	pop ax
 
@@ -1743,7 +1786,7 @@ rmdir_dir:
 	mov ax, 0x1000
 	mov es, ax
 	mov bx, 0xA000
-	mov dl, 0
+	mov dl, [cs:current_drive]
 	mov ah, 0x02
 	mov al, 1
 	int 0x13
@@ -1917,12 +1960,12 @@ write_cluster:
 
 	mov ah, 0x03
 	mov al, 1
-	mov dl, 0
+	mov dl, [cs:current_drive]
 	int 0x13
 
 	push ax
 	xor ax, ax
-	mov dl, 0
+	mov dl, [cs:current_drive]
 	int 0x13
 	pop ax
 
@@ -1959,7 +2002,7 @@ write_file:
 	mov ax, 0x1000
 	mov es, ax
 	mov bx, si
-	mov dl, 0
+	mov dl, [cs:current_drive]
 	mov ah, 0x03
 	mov al, 1
 	int 0x13
@@ -2125,7 +2168,7 @@ read_file_load:
 	mov ax, [read_buffer_seg]
 	mov es, ax
 	mov bx, di
-	mov dl, 0
+	mov dl, [cs:current_drive]
 	mov ah, 0x02
 	mov al, 1
 	int 0x13
@@ -2269,7 +2312,7 @@ del_file:
 	mov ch, 0
 	mov cl, 2
 	mov dh, 1
-	mov dl, 0
+	mov dl, [cs:current_drive]
 	mov ah, 0x03
 	mov al, 14
 	int 0x13
@@ -2277,7 +2320,7 @@ del_file:
 
 	push ax
 	xor ax, ax
-	mov dl, 0
+	mov dl, [cs:current_drive]
 	int 0x13
 	pop ax
 
@@ -2354,7 +2397,7 @@ ren_file:
 	mov ch, 0
 	mov cl, 2
 	mov dh, 1
-	mov dl, 0
+	mov dl, [cs:current_drive]
 	mov ah, 0x03
 	mov al, 14
 	int 0x13
@@ -2362,7 +2405,7 @@ ren_file:
 
 	push ax
 	xor ax, ax
-	mov dl, 0
+	mov dl, [cs:current_drive]
 	int 0x13
 	pop ax
 
@@ -2547,7 +2590,7 @@ do_exec:
     mov ax, 0x2000
     mov es, ax
     mov bx, di
-    mov dl, 0
+    mov dl, [cs:current_drive]
     mov ah, 0x02
     mov al, 1
     int 0x13
@@ -2558,7 +2601,7 @@ do_exec:
     push ax
     push dx
     xor ax, ax
-    mov dl, 0
+    mov dl, [cs:current_drive]
     int 0x13
     pop dx
     pop ax
@@ -3045,7 +3088,7 @@ dos_read_data_sector:
 	mov ax, 0x1000
 	mov es, ax
 	mov bx, 0xA000
-	mov dl, 0
+	mov dl, [cs:current_drive]
 	mov ah, 0x02
 	mov al, 1
 	int 0x13
@@ -3078,7 +3121,7 @@ dos_write_data_sector:
 	mov ax, 0x1000
 	mov es, ax
 	mov bx, 0xA000
-	mov dl, 0
+	mov dl, [cs:current_drive]
 	mov ah, 0x03
 	mov al, 1
 	int 0x13
@@ -3188,6 +3231,7 @@ msg_label_usage db 'Usage : label <NOM>', 13, 10, 0
 msg_label_err db 'Erreur de renomage', 0
 msg_vol_name db 'Le nom du volume est : ', 0
 msg_vol_err db 'Impossible de lire le nom du volume', 0
+msg_drive_err db 'Lecteur pas pret.', 13, 10, 0
 
 cmd_help     db 'help', 0
 cmd_dir      db 'dir', 0
@@ -3211,7 +3255,8 @@ cmd_mkdir db 'mkdir', 0
 cmd_rmdir db 'rmdir', 0
 cmd_label db 'label', 0
 cmd_vol db 'vol', 0
-
+cmd_drive_a db 'a:', 0
+cmd_drive_b db 'b:', 0
 
 fatname      times 11 db 0
 file_size    dw 0
@@ -3222,6 +3267,7 @@ src_size dw 0
 parse_skip dw 5
 free_temp dw 0
 current_cluster dw 0
+current_drive db 0
 saved_user_ds dw 0
 read_buffer_seg dw 0
 read_buffer_off dw 0
