@@ -2807,6 +2807,13 @@ push di
 	test al, al
 	jz .cmd_end
 	mov bl, [si]
+	cmp bl, 'A'
+	jb .compare
+	cmp bl, 'Z'
+	ja .compare
+	add bl, 0x20
+
+	.compare:
 	cmp al, bl
 	jne .no_match
 	inc si
