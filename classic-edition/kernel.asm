@@ -1,2763 +1,1447 @@
+; ============================================================================
+; MicroDOS - Classic Edition
+; Noyau + shell. Charge par boot.asm en 0x1000:0000.
+;
+; Fichiers inclus :
+;   fs.inc    : disque, FAT12/FAT16, repertoires, chemins
+;   file.inc  : fichiers ouverts (lecture/ecriture 32 bits)
+;   mem.inc   : gestion memoire DOS (blocs MCB)
+;   exec.inc  : chargement des .COM / .EXE, fin de programme
+;   dos.inc   : API INT 21h
+; ============================================================================
 [BITS 16]
 [ORG 0x0000]
+
+%define VERSION_STR 'v2.0.0'
+%ifdef DISK_EDITION
+  %define EDITION_STR 'Disk Install Edition'
+%else
+  %define EDITION_STR 'Classic Edition'
+%endif
+
 start:
+    cli
     push cs
     pop ds
     push cs
     pop es
+    xor ax, ax
+    mov ss, ax
+    mov sp, 0x7C00
+    sti
+    cld
 
-	cli
-	push es
-	xor ax, ax
-	mov es, ax
-	mov word [es:0x84], int21_handler
-	mov word [es:0x86], cs
-	pop es
-	sti
+    ; lecteur de demarrage (DL donne par le boot)
+    mov al, dl
+    cmp al, 0x80
+    jb .floppy
+    mov al, 2
+.floppy:
+    cmp al, MAX_DRIVES
+    jb .drive_ok
+    xor al, al
+.drive_ok:
+    mov [def_drive], al
+    mov [boot_drive], al
 
-    mov word [current_cluster], 0
+    call install_vectors
+    call sft_init
+    call mem_init
+    call env_init
 
-	mov si, init_path
-	mov di, current_path
-	call copy_str
+    mov al, [def_drive]
+    call drive_select
 
+%ifdef DISK_EDITION
+    ; demarrage sur la disquette d'installation : menu de l'installateur
+    cmp byte [boot_drive], 2
+    jae .welcome
+    call do_setup
+    jmp main_loop
+.welcome:
+%endif
     mov si, msg_welcome
     call print
 
+; ============================================================================
+; Boucle du shell
+; ============================================================================
 main_loop:
-	mov si, current_path
-	call print
-    mov si, msg_prompt
-    call print
+    cld
+    push cs
+    pop ds
+    push cs
+    pop es
+    call fat_flush
+    mov al, [def_drive]
+    call drive_select
+    call print_prompt
 
     mov di, buffer
     call read_line
 
     mov si, buffer
-    mov di, cmd_help
+    call skip_spaces
+    cmp byte [si], 0
+    je main_loop
+    mov [cmd_start], si
+
+    ; chercher la commande dans la table
+    mov bx, cmd_table
+.find:
+    mov di, [bx]
+    test di, di
+    jz .not_builtin
+    mov si, [cmd_start]
     call strcmp
-    jc do_help
-
-    mov si, buffer
-    mov di, cmd_dir
-    call strcmp
-    jc do_dir
-
-    mov si, buffer
-    mov di, cmd_type
-    call strcmp
-    jc do_type
-
-    mov si, buffer
-    mov di, cmd_ver
-    call strcmp
-    jc do_ver
-
-    mov si, buffer
-    mov di, cmd_cls
-    call strcmp
-    jc do_cls
-
-    mov si, buffer
-	mov di, cmd_reset
-	call strcmp
-	jc do_reset
-
-    mov si, buffer
-    mov di, cmd_echo
-    call strcmp
-    jc do_echo
-
-    mov si, buffer
-    mov di, cmd_pause
-    call strcmp
-    jc do_pause
-
-    mov si, buffer
-    mov di, cmd_date
-    call strcmp
-    jc do_date
-
-    mov si, buffer
-    mov di, cmd_time
-    call strcmp
-    jc do_time
-
-    mov si, buffer
-    mov di, cmd_fatinfo
-    call strcmp
-    jc do_fatinfo
-
-    mov si, buffer
-    mov di, cmd_mkfile
-    call strcmp
-    jc do_mkfile
-
-    mov si, buffer
-    mov di, cmd_copy
-    call strcmp
-    jc do_copy
-
-    mov si, buffer
-    mov di, cmd_del
-    call strcmp
-    jc do_del
-
-    mov si, buffer
-    mov di, cmd_ren
-    call strcmp
-    jc do_ren
-
-    mov si, buffer
-    mov di, cmd_cd
-    call strcmp
-    jc do_cd
-
-    mov si, buffer
-    mov di, cmd_mkdir
-    call strcmp
-    jc do_mkdir
-
-    mov si, buffer
-    mov di, cmd_rmdir
-    call strcmp
-    jc do_rmdir
-
-	mov si, buffer
-	mov di, cmd_label
-	call strcmp
-	jc do_label
-
-	mov si, buffer
-	mov di, cmd_vol
-	call strcmp
-	jc do_vol
-
-	mov si, buffer
-	mov di, cmd_drive_a
-	call strcmp
-	jc do_drive_a
-
-	mov si, buffer
-	mov di, cmd_drive_b
-	call strcmp
-	jc do_drive_b
-
-    mov si, buffer
-    mov di, cmd_rebootdos
-    call strcmp
-    jc do_rebootdos
-
-    mov si, buffer
-    mov di, cmd_reboot
-    call strcmp
-    jc do_reboot
-
-    mov si, buffer
-    call do_exec
+    jc .found
+    add bx, 4
+    jmp .find
+.found:
+    ; SI = arguments (apres le nom de la commande et les espaces)
+    mov si, [cmd_start]
+.skip_name:
+    lodsb
+    call is_end
+    jne .skip_name
+    dec si
+    call skip_spaces
+    mov [cmd_args], si
+    call word [bx+2]
     jmp main_loop
 
+.not_builtin:
+    mov si, [cmd_start]
+    call run_program
+    jmp main_loop
+
+cmd_start   dw 0
+cmd_args    dw 0
+
+; ---------- table des commandes : nom, fonction ----------
+cmd_table:
+    dw cmd_help,      do_help
+    dw cmd_dir,       do_dir
+    dw cmd_type,      do_type
+    dw cmd_ver,       do_ver
+    dw cmd_cls,       do_cls
+    dw cmd_reset,     do_reset
+    dw cmd_echo,      do_echo
+    dw cmd_pause,     do_pause
+    dw cmd_date,      do_date
+    dw cmd_time,      do_time
+    dw cmd_fatinfo,   do_fatinfo
+    dw cmd_mkfile,    do_mkfile
+    dw cmd_copy,      do_copy
+    dw cmd_del,       do_del
+    dw cmd_erase,     do_del
+    dw cmd_ren,       do_ren
+    dw cmd_cd,        do_cd
+    dw cmd_chdir,     do_cd
+    dw cmd_mkdir,     do_mkdir
+    dw cmd_md,        do_mkdir
+    dw cmd_rmdir,     do_rmdir
+    dw cmd_rd,        do_rmdir
+    dw cmd_label,     do_label
+    dw cmd_vol,       do_vol
+    dw cmd_mem,       do_mem
+    dw cmd_diskcopy,  do_diskcopy
+    dw cmd_rebootdos, do_rebootdos
+    dw cmd_reboot,    do_reboot
+    dw cmd_drive_a,   do_drive_a
+    dw cmd_drive_b,   do_drive_b
+    dw cmd_drive_c,   do_drive_c
+%ifdef DISK_EDITION
+    dw cmd_fdisk,     do_fdisk
+    dw cmd_format,    do_format
+    dw cmd_setup,     do_setup
+%endif
+    dw 0
+
+; ============================================================================
+; Commandes simples
+; ============================================================================
 do_help:
     mov si, msg_help
-    call print
-    jmp main_loop
+    jmp print
 
 do_cls:
     mov ax, 0x0003
     int 0x10
-    jmp main_loop
+    ret
 
 do_ver:
     mov si, msg_ver
-    call print
-    jmp main_loop
+    jmp print
 
 do_reboot:
     mov si, msg_reboot
     call print
     mov al, 0xFE
     out 0x64, al
-    jmp main_loop
+    ret
 
 do_rebootdos:
     mov si, msg_rebootdos
     call print
     int 0x19
-    jmp main_loop
-
-do_reset:
-	mov ah, 0x00
-	mov dl, [cs:current_drive]
-	int 0x13
-	mov si, msg_reset
-	call print
-	jmp main_loop
+    ret
 
 do_echo:
-
-	mov si, buffer
-	add si, 4
-	cmp byte [si], ' '
-	jne .done
-	inc si
-
-.print:
-	lodsb
-	or al, al
-	jz .newline
-	mov ah, 0x0E
-	int 0x10
-	jmp .print
-
-.newline:
-
-.done:
-
-	mov ah, 0x0E
-	mov al, 13
-	int 0x10
-	mov al, 10
-	int 0x10
-	jmp main_loop
+    mov si, [cmd_args]
+    call print
+    jmp newline
 
 do_pause:
-
-	mov si, msg_pause
-	call print
-	mov ah, 0x00
-	int 0x16
-	jmp main_loop
+    mov si, msg_pause
+    call print
+    mov ah, 0x00
+    int 0x16
+    ret
 
 do_date:
-
-	mov ah, 0x04
-	int 0x1A
-	; CH=siécle BCD, CL=année BCD, DH=mois BCD, DL=jour BCD
-	mov si, msg_date_prefix
-	call print
-	mov al, dl
-	call print_bcd
-	mov al, '/'
-	mov ah, 0x0E
-	int 0x10
-	mov al, ch
-	call print_bcd
-	mov al, cl
-	call print_bcd
-	mov ah, 0x0E
-	mov al, 13
-	int 0x10
-	mov al, 10
-	int 0x10
-	jmp main_loop
+    mov ah, 0x04
+    int 0x1A                    ; CH=siecle CL=annee DH=mois DL=jour (BCD)
+    mov si, msg_date_prefix
+    call print
+    mov al, dl
+    call print_bcd
+    mov al, '/'
+    call putc
+    mov al, dh
+    call print_bcd
+    mov al, '/'
+    call putc
+    mov al, ch
+    call print_bcd
+    mov al, cl
+    call print_bcd
+    jmp newline
 
 do_time:
-
-	mov ah, 0x02
-	int 0x1A
-	; CH=Heure BCD, CL, minutes BCD, DH=secondes BCD
-	mov si, msg_time_prefix
-	call print
-	mov al, ch
-	call print_bcd
-	mov al, ':'
-	mov ah, 0x0E
-	int 0x10
-	mov al, cl
-	call print_bcd
-	mov ah, 0x0E
-	mov al, 13
-	int 0x10
-	mov al, 10
-	int 0x10
-	jmp main_loop
+    mov ah, 0x02
+    int 0x1A                    ; CH=heures CL=minutes DH=secondes (BCD)
+    mov si, msg_time_prefix
+    call print
+    mov al, ch
+    call print_bcd
+    mov al, ':'
+    call putc
+    mov al, cl
+    call print_bcd
+    mov al, ':'
+    call putc
+    mov al, dh
+    call print_bcd
+    jmp newline
 
 print_bcd:
-
-	push ax
-	shr al, 4
-	add al, '0'
-	mov ah, 0x0E
-	int 0x10
-	pop ax
-	and al, 0x0F
-	add al, '0'
-	mov ah, 0x0E
-	int 0x10
-	ret
-
-do_fatinfo:
-
-	call fat_find_free
-
-	push ax
-
-	mov si, msg_fatinfo
-	call print
-
-	pop ax
-
-	mov cx, 0
-	mov bx, 10
-
-.divide:
-
-	xor dx, dx
-	div bx
-	push dx
-	inc cx
-	test ax, ax
-	jnz .divide
-
-.print:
-
-	pop dx
-	mov al, dl
-	add al, '0'
-	mov ah, 0x0E
-	int 0x10
-	loop .print
-
-	mov ah, 0x0E
-	mov al, 13
-	int 0x10
-	mov al, 10
-	int 0x10
-	jmp main_loop
-
-do_mkfile:
-    mov si, buffer
-    add si, 7
-    cmp byte [si-1], ' '
-    jne .usage
-    call resolve_path
-    jc .error
-    mov word [src_size], 0
-    call create_file
-    cmp ax, 0xFFFF
-    je .error
-    mov si, msg_mkfile_ok
-    call print
-    jmp .exit
-
-.error:
-    mov si, msg_mkfile_err
-    call print
-    jmp .exit
-
-.usage:
-    mov si, msg_mkfile_usage
-    call print
-    jmp .exit
-
-.exit:
-
-	mov ax, [saved_cluster]
-	mov [current_cluster], ax
-	jmp main_loop
-
-do_copy:
-
-	call copy_file
-	cmp ax, 0xFFFF
-	je .error
-	mov si, msg_copy_ok
-	call print
-	jmp main_loop
-
-.error:
-
-	mov si, msg_copy_err
-	call print
-	jmp main_loop
-
-do_del:
-
-	mov si, buffer
-	add si, 4
-	cmp byte [si-1], ' '
-	jne .usage
-	call resolve_path
-	jc .error
-	call del_file
-	cmp ax, 0xFFFF
-	je .error
-	cmp ax, 0xFFFE
-	je .protected
-	cmp ax, 0xFFFD
-	je .is_dir
-	mov si, msg_del_ok
-	call print
-	jmp .exit
-
-.error:
-
-	mov si, msg_del_err
-	call print
-	jmp .exit
-
-.protected:
-
-	mov si, msg_del_protected
-	call print
-	jmp .exit
-
-.usage:
-
-	mov si, msg_del_usage
-	call print
-	jmp .exit
-
-.is_dir:
-
-	mov si, msg_del_dir
-	call print
-	jmp .exit
-
-.exit:
-
-	mov ax, [saved_cluster]
-	mov [current_cluster], ax
-	jmp main_loop
-
-do_ren:
-
-	mov si, buffer
-	add si, 4
-	cmp byte [si-1], ' '
-	jne .usage
-
-	call ren_file
-	cmp ax, 0xFFFF
-	je .error
-	cmp ax, 0xFFFE
-	je .protected
-	mov si, msg_ren_ok
-	call print
-	jmp .exit
-
-.error:
-
-	mov si, msg_ren_err
-	call print
-	jmp .exit
-
-.protected:
-
-	mov si, msg_ren_protected
-	call print
-	jmp .exit
-
-.usage:
-
-	mov si, msg_ren_usage
-	call print
-	jmp .exit
-
-.exit:
-
-	mov ax, [saved_cluster]
-	mov [current_cluster], ax
-	jmp main_loop
-
-do_cd:
-
-	mov si, buffer
-	add si, 3
-	cmp byte [si-1], ' '
-	jne .root
-	call cd_dir
-	cmp ax, 0xFFFF
-	je .error
-	jmp main_loop
-
-.root:
-
-	mov word [current_cluster], 0
-	jmp main_loop
-
-.error:
-
-	mov si, msg_cd_err
-	call print
-	jmp main_loop
-
-do_mkdir:
-
-	mov si, buffer
-	add si, 6
-	cmp byte [si-1], ' '
-	jne .usage
-	call resolve_path
-	jc .error
-	call mkdir_dir
-	cmp ax, 0xFFFF
-	je .error
-	mov si, msg_mkdir_ok
-	call print
-	jmp .exit
-
-.error:
-
-	mov si, msg_mkdir_err
-	call print
-	jmp .exit
-
-.usage:
-
-	mov si, msg_mkdir_usage
-	call print
-	jmp .exit
-
-.exit:
-
-	mov ax, [saved_cluster]
-	mov [current_cluster], ax
-	jmp main_loop
-
-do_rmdir:
-
-	mov si, buffer
-	add si, 6
-	cmp byte [si-1], ' '
-	jne .usage
-	call resolve_path
-	jc .error
-	call rmdir_dir
-	cmp ax, 0xFFFF
-	je .error
-	mov si, msg_rmdir_ok
-	call print
-	jmp .exit
-
-.error:
-
-	mov si, msg_rmdir_err
-	call print
-	jmp .exit
-
-.usage:
-
-	mov si, msg_rmdir_usage
-	call print
-	jmp .exit
-
-.exit:
-
-
-        mov ax, [saved_cluster]
-        mov [current_cluster], ax
-        jmp main_loop
-
-do_label:
-
-	mov si, buffer
-	add si, 6
-	cmp byte [si-1], ' '
-	jne .usage
-
-	;--lire le secteur de boot--
-
-	xor ax , ax
-	call lba_to_chs
-	mov ax, 0x1000
-	mov es, ax
-	mov bx, 0xA000
-	mov ah, 0x02
-	mov al, 1
-	mov dl, [cs:current_drive]
-	int 0x13
-	jc .read_error
-
-	;--prepare le nouveau nom (11 caractere max)--
-
-	mov di, 0xA000
-	add di, 43
-	mov cx, 11
-
-.format_name:
-
-	mov al, [si]
-	cmp al, 0
-	je .fill_space
-	cmp al, ' '
-	je .fill_space
-	cmp al, 'a'
-	jb .sotre_char
-	cmp al, 'z'
-	ja .sotre_char
-	sub al, 32
-
-.sotre_char:
-
-	mov [di], al
-	inc di
-	inc si
-	dec cx
-	jnz .format_name
-	jmp .write_sector 
-
-.fill_space:
-
-	mov byte [di], ' '
-	inc di
-	dec cx
-	jnz .write_sector
-
-.write_sector:
-
-	;--réecrire le boot_sector (lba0)--
-
-	xor ax, ax
-	call lba_to_chs
-	mov ax, 0x1000
-	mov es, ax
-	mov bx, 0xA000
-	mov ah, 0x03
-	mov al, 1
-	mov dl, [cs:current_drive]
-	int 0x13
-	jc .write_error
-
-	;--Succes--
-
-	mov si, msg_label_ok
-	call print
-	jmp main_loop
-
-
-
-.read_error:
-
-	mov si, msg_label_err
-	call print
-	jmp main_loop
-
-.write_error:
-
-	;--affiche l'erreur si l'ecriture echoue--
-
-	mov si, msg_label_err
-	call print
-	jmp main_loop
-
-.usage:
-
-	mov si, msg_label_usage
-	call print
-	jmp main_loop
-
-do_vol:
-
-	;--lire le boot_sector--
-
-		;--lire le secteur de boot--
-
-	xor ax , ax
-	call lba_to_chs
-	mov ax, 0x1000
-	mov es, ax
-	mov bx, 0xA000
-	mov ah, 0x02
-	mov al, 1
-	mov dl, [cs:current_drive]
-	push ds
-	int 0x13
-	pop ds 
-	jc .read_error
-
-	;--affiche le nom--
-
-	mov si, msg_vol_name
-	call print
-
-	mov si, 0xA000
-	add si, 43
-	mov cx, 11
-
-.print_vol:
-
-	mov al, [si]
-	mov ah, 0x0E
-	int 0x10
-	inc si
-	loop .print_vol
-
-	mov ah, 0x0E
-	mov al, 13
-	int 0x10
-	mov al, 10
-	int 0x10
-	jmp main_loop
-
-.read_error:
-
-	mov si, msg_vol_err
-	call print
-	jmp main_loop
-
-do_drive_a:
-
-	mov byte [current_drive], 0
-	jmp change_drive
-
-do_drive_b:
-
-mov byte [current_drive], 1
-
-change_drive:
-
-	mov ah, 0x00
-	mov dl, [current_drive]
-	int 0x13
-	jnc .ok
-
-	mov byte [current_drive], 0
-	mov si, msg_drive_err
-	call print
-	jmp main_loop
-
-.ok:
-
-	mov word [current_cluster], 0
-
-	mov si, init_path
-	mov di, current_path
-	call copy_str
-
-	mov al, [current_drive]
-	add al, 'A'
-	mov [current_path], al
-	jmp main_loop
-
-; ---------- DIR ----------
-do_dir:
-
-    call load_current_dir
-    jc .error
-
-    mov si, 0x8000
-    mov bp, 224
-
-.loop:
-    mov al, [si]
-    cmp al, 0
-    je .done
-    cmp al, 0xE5
-    je .next
-
-    mov al, [si+11]
-    cmp al, 0x0F
-    je .next
-    test al, 0x08
-    jnz .next
-    test al, 0x02
-    jnz .next
-
-    mov di, si
-    mov cx, 8
-.print_name:
-    mov al, [di]
-    cmp al, ' '
-    je .name_done
-    mov ah, 0x0E
-    int 0x10
-    inc di
-    loop .print_name
-.name_done:
-
-    mov al, [si+8]
-    cmp al, ' '
-    je .no_ext
-    mov ah, 0x0E
-    mov al, '.'
-    int 0x10
-    mov di, si
-    add di, 8
-    mov cx, 3
-.print_ext:
-    mov al, [di]
-    cmp al, ' '
-    je .ext_done
-    mov ah, 0x0E
-    int 0x10
-    inc di
-    loop .print_ext
-.ext_done:
-.no_ext:
-
-	push si
-	mov al, [si+11]
-	test al, 0X10
-	jz .not_dir
-	mov si, msg_dir_tag
-	call print
-
-.not_dir:
-
-	pop si
-	mov ah, 0x0E
-	mov al, 13
-	int 0x10
-	mov al, 10
-	int 0x10
-.next:
-    add si, 32
-    dec bp
-    jnz .loop
-
-.done:
-    jmp main_loop
-
-.error:
-    mov si, msg_dir_err
-    call print
-    jmp main_loop
-
-; ---------- TYPE ----------
-do_type:
-    mov si, buffer
-    add si, 5
-    call resolve_path
-    call build_fat_name
-    call find_file
-    jc .not_found
-
-    mov al, [si + 11]
-    test al, 0x10
-    jnz .not_found
-
-    mov ax, [si + 26]
-    mov bx, [si + 28]
-    mov [file_size], bx
-
-    add ax, 31
-    call lba_to_chs
-
-    mov ax, 0x1000
-    mov es, ax
-    mov bx, 0xA000
-    mov ah, 0x02
-    mov al, 1
-    int 0x13
-    jc .read_err
-
-    mov si, 0xA000
-    mov cx, [file_size]
-.print:
-    test cx, cx
-    jz .done
-    mov al, [si]
-    mov ah, 0x0E
-    int 0x10
-    inc si
-    dec cx
-    jmp .print
-
-.done:
-    mov ax, [saved_cluster]
-    mov [current_cluster], ax
-    mov ah, 0x0E
-    mov al, 13
-    int 0x10
-    mov al, 10
-    int 0x10
-    jmp main_loop
-
-.not_found:
-    mov ax, [saved_cluster]
-    mov [current_cluster], ax
-    mov si, msg_not_found
-    call print
-    jmp main_loop
-
-.read_err:
-    mov ax, [saved_cluster]
-    mov [current_cluster], ax
-    mov si, msg_dir_err
-    call print
-    jmp main_loop
-
-; ---------- Convertit "HELLO.TXT" en "HELLO   TXT" ----------
-build_fat_name:
-    push si
-    push di
-    mov di, fatname
-
-    mov cx, 8
-.copy_name:
-    mov al, [si]
-    cmp al, '.'
-    je .pad_name
-    cmp al, 0
-    je .pad_name
-    cmp al, '\'
-    je .pad_name
-    cmp al, '/'
-    je .pad_name
-    cmp al, 'a'
-    jb .store_name
-    cmp al, 'z'
-    ja .store_name
-    sub al, 32
-
-.store_name:
-
-	mov [di], al
-	inc di
-	inc si
-	dec cx
-	jnz .copy_name
-	cmp byte [si], '.'
-	jne .copy_ext
-	inc si
-	jmp .copy_ext
-
-.pad_name:
-    test cx, cx
-    jz .skip_dot
-    mov byte [di], ' '
-    inc di
-    dec cx
-    jmp .pad_name
-
-.skip_dot:
-    cmp byte [si], '.'
-    jne .copy_ext
-    inc si
-
-.copy_ext:
-    mov cx, 3
-.copy_ext_loop:
-    mov al, [si]
-    cmp al, 0
-    je .pad_ext
-    cmp al, '\'
-    je .pad_ext
-    cmp al, '/'
-    je .pad_ext
-    cmp al, 'a'
-    jb .store_ext
-    cmp al, 'z'
-    ja .store_ext
-    sub al, 32
-
-.store_ext:
-
-	mov [di], al
-	inc di
-	inc si
-	dec cx
-	jnz .copy_ext_loop
-	jmp .done
-
-
-.pad_ext:
-    test cx, cx
-    jz .done
-    mov byte [di], ' '
-    inc di
-    dec cx
-    jmp .pad_ext
-
-.done:
-    pop di
-    pop si
-    ret
-
-; ---------- Cherche [fatname] dans le repertoire racine ----------
-; Retourne SI = entree trouvee, ou Carry=1 si pas trouve
-find_file:
-
-    call load_current_dir
+    push ax
+    shr al, 4
+    add al, '0'
+    call putc
+    pop ax
+    and al, 0x0F
+    add al, '0'
+    jmp putc
+
+; ---------- reset : relit la disquette ----------
+do_reset:
+    mov byte [dv_mounted], 0
+    mov al, [cur_drive]
+    call drive_select
     jc .err
-
-    mov di, 0x8000
-    mov bp, 224
-
-.loop:
-    mov al, [di]
-    cmp al, 0
-    je .not_found
-    cmp al, 0xE5
-    je .next
-    mov al, [di+11]
-    cmp al, 0x0F
-    je .next
-
-    push si
-    push di
-    mov si, fatname
-    mov cx, 11
-.cmp:
-    mov al, [si]
-    mov bl, [di]
-    cmp al, bl
-    jne .no_match
-    inc si
-    inc di
-    loop .cmp
-    pop di
-    pop si
-    mov si, di
-    clc
-    ret
-
-.no_match:
-    pop di
-    pop si
-
-.next:
-    add di, 32
-    dec bp
-    jnz .loop
-
-.not_found:
-    stc
-    ret
-
+    mov si, msg_reset
+    jmp print
 .err:
-    stc
+    jmp disk_error
+
+; ---------- a: b: c: ----------
+do_drive_a:
+    xor al, al
+    jmp change_drive
+do_drive_b:
+    mov al, 1
+    jmp change_drive
+do_drive_c:
+    mov al, 2
+change_drive:
+    mov ah, [def_drive]
+    mov [def_drive], al
+    call drive_select
+    jnc .ok
+    mov [def_drive], ah
+    mov si, msg_drive_err
+    call print
+.ok:
     ret
 
-; ---------- Convertit un LBA (AX) en CHS ----------
-lba_to_chs:
+; ---------- fatinfo : espace libre ----------
+do_fatinfo:
+    mov al, [def_drive]
+    call drive_select
+    jc disk_error
+    call free_clusters
+    push eax
+    mov si, msg_fatinfo
+    call print
+    call print_dec32
+    mov si, msg_bytes_free
+    call print
+    pop eax
+    movzx ecx, byte [dv_spc]
+    shl ecx, 9
+    mul ecx
+    call print_dec32
+    mov si, msg_bytes
+    call print
+    ret
+
+; ---------- mem : memoire conventionnelle libre ----------
+do_mem:
+    call mem_largest
+    movzx eax, ax
+    shl eax, 4
+    mov si, msg_mem
+    call print
+    call print_dec32
+    mov si, msg_bytes
+    jmp print
+
+; ============================================================================
+; DIR [chemin]
+; ============================================================================
+dir_count   dw 0
+dir_dirs    dw 0
+dir_bytes   dd 0
+dir_index   dw 0
+dir_clust   dw 0
+dir_pattern times 11 db 0
+
+do_dir:
+    mov si, [cmd_args]
+    call path_resolve
+    jc .bad_path
+    mov [dir_clust], ax
+    cmp byte [path_empty], 0
+    jne .all
+    cmp word [fname], '. '
+    je .all
+    ; un nom avec jokers est un motif
+    mov di, fname
+    mov cx, 11
+    mov al, '?'
+    repne scasb
+    je .pattern
+    ; est-ce un dossier ? alors on liste son contenu
+    mov ax, [dir_clust]
+    push ax
+    call dir_search
+    pop ax
+    jc .pattern
+    test byte [si+11], ATTR_DIR
+    jz .pattern
+    cmp word [fname], '..'
+    jne .sub
+    test ax, ax
+    jz .all                     ; ".." depuis la racine
+.sub:
+    mov ax, [si+26]
+    mov [dir_clust], ax
+.all:
+    mov di, fname
+    mov cx, 11
+    mov al, '?'
+    rep stosb
+.pattern:
+    mov si, fname
+    mov di, dir_pattern
+    mov cx, 11
+    rep movsb
+
+    mov word [dir_count], 0
+    mov word [dir_dirs], 0
+    mov dword [dir_bytes], 0
+    xor dx, dx
+.loop:
+    mov si, dir_pattern
+    mov di, fname
+    mov cx, 11
+    rep movsb
+    mov ax, [dir_clust]
+    mov cl, ATTR_DIR
+    call find_entry
+    jc .end
+    mov [dir_index], dx
+    call print_dir_entry
+    mov dx, [dir_index]
+    inc dx
+    jmp .loop
+.end:
+    ; resume
+    mov si, msg_dir_sp
+    call print
+    movzx eax, word [dir_count]
+    call print_dec32
+    mov si, msg_dir_files
+    call print
+    mov eax, [dir_bytes]
+    call print_dec32
+    mov si, msg_bytes
+    call print
+    mov si, msg_dir_sp
+    call print
+    movzx eax, word [dir_dirs]
+    call print_dec32
+    mov si, msg_dir_dirs
+    call print
+    call free_clusters
+    movzx ecx, byte [dv_spc]
+    shl ecx, 9
+    mul ecx
+    call print_dec32
+    mov si, msg_bytes_free
+    call print
+    mov si, msg_crlf
+    jmp print
+.bad_path:
+    mov si, msg_cd_err
+    jmp print
+
+; print_dir_entry : SI = entree -> "NOM      EXT     taille" ou "<DIR>"
+print_dir_entry:
+    push si
+    mov cx, 8
+.name:
+    lodsb
+    call putc
+    loop .name
+    mov al, ' '
+    call putc
+    mov cx, 3
+.ext:
+    lodsb
+    call putc
+    loop .ext
+    pop si
+    test byte [si+11], ATTR_DIR
+    jz .file
+    inc word [dir_dirs]
+    push si
+    mov si, msg_dir_tag
+    call print
+    pop si
+    jmp .date
+.file:
+    inc word [dir_count]
+    mov eax, [si+28]
+    add [dir_bytes], eax
+    mov cx, 10
+    call print_dec32_pad
+.date:
+    mov al, ' '
+    call putc
+    call putc
+    mov ax, [si+24]             ; date : jour/mois/annee
+    push ax
+    and ax, 31
+    call print_2dig
+    mov al, '/'
+    call putc
+    pop ax
+    push ax
+    shr ax, 5
+    and ax, 15
+    call print_2dig
+    mov al, '/'
+    call putc
+    pop ax
+    shr ax, 9
+    add ax, 1980
+    movzx eax, ax
+    call print_dec32
+    jmp newline
+
+; print_2dig : AX (0..99) -> deux chiffres
+print_2dig:
     push ax
     push bx
-
-    xor dx, dx
-    mov bx, 18
-    div bx
-    mov cl, dl
-    inc cl
-
-    xor dx, dx
-    mov bx, 2
-    div bx
-    mov ch, al
-    mov dh, dl
-    mov dl, [cs:current_drive]
-
+    mov bl, 10
+    div bl
+    add al, '0'
+    call putc
+    mov al, ah
+    add al, '0'
+    call putc
     pop bx
     pop ax
     ret
 
-;----------- FAT12 : lire une entrée --------------
-;Entree : AX = numero de cluster
-;Sortie AX = valeur de l'entrée FAT
-
-fat_get:
-
-	push bx
-	push cx
-	push dx
-	push si
-	push es
-
-	mov [cluster_temp], ax
-	mov bx, ax
-	mov ax, ax
-	shr ax, 1
-	add ax, bx
-	push ax
-
-	xor dx, dx
-	mov cx, 512
-	div cx
-	add ax, 1
-	call lba_to_chs
-
-	mov ax, 0x1000
-	mov es, ax
-	mov bx, 0x6000
-	mov ah, 0x02
-	; Une entree FAT12 peut chevaucher deux secteurs.
-	mov al, 2
-	mov dl, [cs:current_drive]
-	int 0x13
-	jc .error
-
-	pop ax
-	and ax, 0x01FF
-	mov si, 0x6000
-	add si, ax
-	mov ax, [si]
-
-	mov bx, [cluster_temp]
-	test bx, 1
-	je .even
-	shr ax, 4
-
-.even:
-	and ax, 0x0FFF
-
-	pop es
-	pop si
-	pop dx
-	pop cx
-	pop bx
-	ret
-
-.error:
-
-	xor ax, ax
-	pop ax
-	pop es
-	pop si
-	pop dx
-	pop cx
-	pop bx
-	ret
-
-;--------------- FAT12 : ecrire une entrée ----------------
-;Entrée : AX = cluster, DX= Valeur
-
-fat_set:
-
-	push ax
-	push bx
-	push cx
-	push dx
-	push si
-	push es
-
-	mov [cluster_temp], ax
-	mov bx, ax
-	push dx
-
-	mov ax, ax
-	shr ax, 1
-	add ax, bx
-	push ax
-
-	xor dx, dx
-	mov cx, 512
-	div cx
-	add ax, 1
-	call lba_to_chs
-
-	mov ax, 0x1000
-	mov es, ax
-	mov bx, 0x6000
-	mov ah, 0x02
-	mov al, 1
-	mov dl, [cs:current_drive]
-	int 0x13
-	jc .error
-
-	pop ax
-	and ax, 0x01FF
-	mov si, 0x6000
-	add si, ax
-
-	mov ax, [si]
-	pop dx
-
-	mov bx, [cluster_temp]
-	test bx, 1
-	jnz .odd
-
-	and ax, 0xF000
-	and dx, 0x0FFF
-	or ax, dx
-	jmp .write
-
-.odd:
-
-	and ax, 0x000F
-	shl dx, 4
-	and dx, 0xFFF0
-	or ax, dx
-
-.write:
-	mov [si], ax
-	mov ax, 0x1000
-	mov es, ax
-	mov bx, 0x6000
-	mov ch, 0
-	mov cl, 2
-	mov dh, 0
-	mov dl, [cs:current_drive]
-	mov ah, 0x03
-	mov al, 1
-	int 0x13
-
-.error:
-
-	pop es
-	pop si
-	pop dx
-	pop cx
-	pop bx
-	pop ax
-	ret
-
-fat_find_free:
-
-	push bx
-	push cx
-
-	mov ax, 2
-
-.loop:
-
-	push ax
-	call fat_get
-	pop bx
-	test ax, ax
-	jz .found
-
-	mov ax, bx
-	inc ax
-	cmp ax, 2848
-	jb .loop
-
-	mov ax, 0xFFFF
-	jmp .done
-
-.found:
-
-	mov ax, bx
-
-.done:
-
-	pop cx
-	pop bx
-	ret
-
-; ------------------ FAT12 libere une chaine de cluster -----------
-
-free_cluster_chain:
-
-	push ax
-	push bx
-	push cx
-
-	mov bx, ax
-
-.loop:
-
-	cmp bx, 0xFF8
-	jae .done
-	cmp bx, 2
-	jb .done
-
-	mov [free_temp], bx
-	mov ax, bx
-	call fat_get
-	mov cx, ax
-
-	mov ax, [free_temp]
-	xor dx, dx
-	call fat_set
-
-	mov bx, cx
-	jmp .loop
-
-.done:
-
-	pop cx
-	pop bx
-	pop ax
-	ret
-
-; ------------------ Charger le repectoire courant a 0x8000 ------
-
-load_current_dir:
-
-	push ax
-	push bx
-	push cx
-	push dx
-	push es
-
-	mov ax, [current_cluster]
-	test ax, ax
-	jz .root
-
-	add ax, 31
-	call lba_to_chs
-	jmp .load
-
-.root:
-
-	mov ch, 0
-	mov cl, 2
-	mov dh, 1
-
-.load:
-
-	mov ax, 0x1000
-	mov es, ax
-	mov bx, 0x8000
-	mov dl, [cs:current_drive]
-	mov ah, 0x02
-
-	cmp word [current_cluster], 0
-	jne .one_sector
-	mov al, 14
-	jmp .do_read
-
-.one_sector:
-
-	mov al, 1
-
-.do_read:
-
-	int 0x13
-	pop es
-	pop dx
-	pop cx
-	pop bx
-	pop ax
-	ret
-
-; ----------------- trouver un Handle Libre ----------------------
-
-find_free_handle:
-
-	push bx
-	push di
-
-	mov di, open_files
-	mov cx, 5
-	mov bx, 5
-
-.loop:
-
-	cmp byte [di+6], 0
-	je .found
-	add di, 16
-	inc bx
-	loop .loop
-
-	mov ax, 0xFFFF
-	jmp .done
-
-.found:
-
-	mov ax, bx
-
-.done:
-
-	pop di
-	pop bx
-	ret
-
-; --------------------- trouver une entree Libre par Handle -------------
-
-
-find_handle:
-
-	cmp ax, 5
-	jb .error
-	cmp ax, 10
-	jae .error
-
-	sub ax, 5
-	shl ax, 4
-	mov di, open_files
-	add di, ax
-
-	clc
-	ret
-
-.error:
-
-	stc
-	ret
-; ----------------- copier une chaine ----------------------------
-
-copy_str:
-
-	lodsb
-	stosb
-	test al, al
-	jnz copy_str
-	ret
-
-; ----------------- ajouter un nom au chemain --------------------
-
-append_path:
-
-	push ax
-	push di
-	push si
-
-	mov di, current_path
-
-.find_end:
-
-	cmp byte [di], 0
-	je .add
-	inc di
-	jmp .find_end
-
-.add:
-
-	cmp di, current_path
-	je .no_backslash
-	cmp byte [di-1], '\'
-	je .copy
-	mov byte [di], '\'
-	inc di
-	jmp .copy
-
-.no_backslash:
-
-	mov byte [di], '\'
-	inc di
-
-.copy:
-
-	lodsb
-	test al, al
-	jz .copy_done
-	cmp al, 'a'
-	jb .store
-	cmp al, 'z'
-	ja .store
-	sub al, 32
-
-.store:
-	stosb
-	jmp .copy
-
-.copy_done:
-
-	pop si
-	pop di
-	pop ax
-	ret
-
-;------------------------- enlever le nom du chemin ------------------------
-
-chop_path:
-
-	push ax
-	push di
-
-	mov di, current_path
-
-	cmp byte [di+3], 0
-	je .done
-
-.find_end:
-
-	cmp byte [di], 0
-	je .go_back
-	inc di
-	jmp .find_end
-
-.go_back:
-
-.back:
-
-	cmp di, current_path
-	jbe .done
-	dec di
-	cmp byte [di], '\'
-	je .truncate
-	jmp .back
-
-.truncate:
-
-	mov ax, di
-	sub ax, current_path
-	cmp ax, 2
-	je .keep_root
-
-	mov byte [di], 0
-	jmp .done
-
-.keep_root:
-
-	mov byte [di+1], 0
-.done:
-
-	pop di
-	pop ax
-	ret
-
-
-; ----------------- resoudre un chemin ---------------------------
-
-resolve_path:
-
-	push ax
-	push bx
-	push di
-	push es
-
-	mov ax, [current_cluster]
-	mov [saved_cluster], ax
-	mov [path_filename], si
-
-.loop:
-
-	mov di, si
-
-.scan:
-
-	mov al, [di]
-	test al, al
-	jz .done
-	cmp al, '\'
-	je .found_backslash
-	inc di
-	jmp .scan
-
-.found_backslash:
-
-	mov byte [di], 0
-	inc di
-	push di
-
-	call cd_dir
-	pop si
-	jc .error
-
-	mov [path_filename], si
-
-	jmp .loop
-
-.done:
-
-	clc
-	jmp .exit
-
-.error:
-
-	mov ax, [saved_cluster]
-	mov [current_cluster], ax
-	stc
-
-.exit:
-
-	pop es
-	pop di
-	pop bx
-	pop ax
-	ret
-
-
-; ------------------ Sauvegarde le repectoire courant ------------
-
-save_current_dir:
-
-	push ax
-	push bx
-	push cx
-	push bx
-	push es
-
-	mov ax, 0x1000
-	mov es, ax
-	mov bx, 0x8000
-
-	mov ax, [current_cluster]
-	test ax, ax
-	jz .root
-
-	add ax, 31
-	call lba_to_chs
-	mov al, 1
-	jmp .do_write
-
-.root:
-
-	mov ch, 0
-	mov cl, 2
-	mov dh, 1
-	mov al, 14
-
-.do_write:
-
-	mov dl, [cs:current_drive]
-	mov ah, 0x03
-	int 0x13
-
-	push ax
-	xor ax, ax
-	mov dl, [cs:current_drive]
-	int 0x13
-	pop ax
-
-	pop es
-	pop dx
-	pop cx
-	pop dx
-	pop ax
-	ret
-
-;------------------- creer un dossier ----------------------------
-
-mkdir_dir:
-
-	push bx
-	push cx
-	push dx
-	push si
-	push di
-
-	call build_fat_name
-
-	call fat_find_free
-	cmp ax, 0xFFFF
-	je .error
-	mov [cluster_temp], ax
-
-	mov dx, 0xFFF
-	call fat_set
-
-	call find_free_entry
-	jc .error
-
-	mov [dir_entry_addr], si
-
-	mov di, si
-	mov si, fatname
-	mov ax, [cluster_temp]
-	mov dx, ax
-	xor bx, bx
-	call write_dir_entry
-
-	mov di, [dir_entry_addr]
-	mov byte [di+11], 0x10
-
-	call init_new_dir
-	call save_current_dir
-
-	call save_current_dir
-
-	xor ax, ax
-	jmp .done
-
-.error:
-
-	mov ax, 0xFFFF
-
-.done:
-
-	pop di
-	pop si
-	pop dx
-	pop cx
-	pop bx
-	ret
-
-; ------------------ initialise un dossier -----------------------
-
-init_new_dir:
-
-	push ax
-	push bx
-	push cx
-	push dx
-	push di
-	push es
-
-	mov ax, 0x1000
-	mov es, ax
-	mov di, 0xA000
-
-	mov al, '.'
-	stosb
-	mov cx, 10
-
-	mov al, '.'
-	stosb
-	mov cx, 10
-
-.dot_pad:
-
-	mov al, ' '
-	stosb
-	loop .dot_pad
-
-	mov al, 0x10
-	stosb
-
-	mov cx, 10
-
-.dot_reserved:
-
-	xor al, al
-	stosb
-	loop .dot_reserved
-
-	xor ax, ax
-	stosw
-	stosw
-
-	mov ax, [cluster_temp]
-	stosw
-
-	xor ax, ax
-	stosw
-	stosw
-
-	mov al, '.'
-	stosb
-	mov al, '.'
-	stosb
-	mov cx, 9
-
-.dotdot_pad:
-
-	mov al, ' '
-	stosb
-	loop .dotdot_pad
-
-	mov al, 0x10
-	stosb
-
-	mov cx, 10
-
-.dotdot_reserved:
-
-	xor al, al
-	stosb
-	loop .dotdot_reserved
-
-	xor ax, ax
-	stosw
-	stosw
-
-	mov ax, [current_cluster]
-	stosw
-
-	xor ax, ax
-	stosw
-	stosw
-
-	mov ax, [cluster_temp]
-	add ax, 31
-	call lba_to_chs
-
-	mov ax, 0x1000
-	mov es, ax
-	mov bx, 0xA000
-	mov dl, [cs:current_drive]
-	mov ah, 0x03
-	mov al, 1
-	int 0x13
-
-	push ax
-	xor ax, ax
-	mov dl, [cs:current_drive]
-	int 0x13
-	pop ax
-
-	pop es
-	pop di
-	pop dx
-	pop cx
-	pop bx
-	pop ax
-	ret
-
-; ------------------ Suprimmer un dossier vide -------------------
-
-rmdir_dir:
-
-	push bx
-	push cx
-	push dx
-	push si
-	push di
-	push es
-
-	call build_fat_name
-
-	call find_file
-	jc .error
-
-	mov al, [si+11]
-	test al, 0x10
-	jz .error
-
-	mov ax, [si + 26]
-	mov [free_temp], ax
-
-	add ax, 31
-	call lba_to_chs
-
-	mov ax, 0x1000
-	mov es, ax
-	mov bx, 0xA000
-	mov dl, [cs:current_drive]
-	mov ah, 0x02
-	mov al, 1
-	int 0x13
-	jc .error
-
-	mov di, 0xA000
-	mov cx, 16
-
-.check_loop:
-
-	mov al, [di]
-	cmp al, 0
-	je .empty
-	cmp al, 0xE5
-	je .skip
-	cmp al, '.'
-	je .skip
-	jmp .error
-
-.skip:
-
-	add di, 32
-	dec cx
-	jnz .check_loop
-	jmp .error
-
-.empty:
-
-	mov byte [si], 0xE5
-
-	call save_current_dir
-
-	mov ax, [free_temp]
-	call free_cluster_chain
-
-	xor ax, ax
-	jmp .done
-
-.error:
-
-	mov ax, 0xFFFF
-
-.done:
-
-	pop es
-	pop di
-	pop si
-	pop dx
-	pop cx
-	pop bx
-	ret
-
-; ------------------ changer de repectoire -----------------------
-
-cd_dir:
-
-	push bx
-	push cx
-	push dx
-	push si
-	push di
-
-	cmp byte [si], '.'
-	jne .normal
-	cmp byte [si+1], '.'
-	jne .normal
-	mov word [current_cluster], 0
-	call chop_path
-	xor ax, ax
-	jmp .done
-
-.normal:
-
-	mov [path_filename], si       ; ← AJOUTÉ : sauvegarder le nom
-	call build_fat_name
-	call find_file
-	jc .error
-
-	mov al, [si + 11]
-	test al, 0x10
-	jz .error
-
-	mov ax, [si + 26]
-	mov [current_cluster], ax
-
-	mov si, [path_filename]       ; ← récupérer le nom
-	call append_path
-
-	xor ax, ax
-	jmp .done
-
-.error:
-
-	mov ax, 0xFFFF
-
-.done:
-
-	pop di
-	pop si
-	pop dx
-	pop cx
-	pop bx
-	ret
-
-
-;------------------- Trouver une entrée libre ---------------------
-
-find_free_entry:
-
-	push ax
-	push bx
-	push cx
-	push dx
-	push es
-
-	call load_current_dir
-	jc .error
-
-	mov si, 0x8000
-	mov bp, 224
-
-.loop:
-
-	mov al, [si]
-	cmp al, 0
-	je .found
-	cmp al, 0xE5
-	je .found
-
-	add si, 32
-	dec bp
-	jnz .loop
-
-	stc
-	jmp .done
-
-.found:
-
-	clc
-	jmp .done
-
-.error:
-
-	stc
-
-.done:
-
-	pop es
-	pop dx
-	pop cx
-	pop bx
-	pop ax
-	ret
-
-;-------------------------- FAT12 : ecrire un cluster sur la disquette ------------
-
-write_cluster:
-
-	push ax
-	push bx
-	push cx
-	push dx
-	push es
-
-	add ax, 31
-	call lba_to_chs
-
-	push ds
-	pop es
-	mov bx, 0xA000
-
-	mov ah, 0x03
-	mov al, 1
-	mov dl, [cs:current_drive]
-	int 0x13
-
-	push ax
-	xor ax, ax
-	mov dl, [cs:current_drive]
-	int 0x13
-	pop ax
-
-	pop es
-	pop dx
-	pop cx
-	pop bx
-	pop ax
-	ret
-
-; ------------- ecrire un fichier (Multi cluster) ---------------
-
-write_file:
-
-	push ax
-	push bx
-	push cx
-	push dx
-	push si
-	push di
-	push es
-
-	mov [free_temp], ax
-	mov [src_size], bx
-	mov si, 0xA000
-
-.write_loop:
-
-	mov ax, [free_temp]
-	add ax, 31
-	call lba_to_chs
-
-	push si
-	mov ax, 0x1000
-	mov es, ax
-	mov bx, si
-	mov dl, [cs:current_drive]
-	mov ah, 0x03
-	mov al, 1
-	int 0x13
-	pop si
-	jc .error
-
-	add si, 512
-
-	mov ax, [src_size]
-	sub ax, 512
-	jbe .last_cluster
-	mov [src_size], ax
-
-	call fat_find_free
-	cmp ax, 0xFFFF
-	je .error
-	mov bx, ax
-
-	mov dx, bx
-	mov ax, [free_temp]
-	call fat_set
-
-	mov ax, dx
-	mov dx, 0xFFF
-	call fat_set
-
-	mov [free_temp], bx
-	jmp .write_loop
-
-.last_cluster:
-
-	mov ax, [free_temp]
-	mov dx, 0xFFF
-	call fat_set
-
-	xor ax, ax
-	jmp .done
-
-.error:
-
-	mov ax, 0xFFFF
-
-.done:
-
-	pop es
-	pop di
-	pop si
-	pop dx
-	pop cx
-	pop bx
-	pop ax
-	ret
-;-------------- Parser deux argument -----------------------------
-
-parse_two_args:
-
-	push ax
-	push si
-
-	mov si, buffer
-	add si, [parse_skip]
-
-	mov [arg1_ptr], si
-
-.skip1:
-
-	lodsb
-	or al, al
-	jz .error
-	cmp al, ' '
-	jne .skip1
-
-	dec si
-	mov byte [si], 0
-	inc si
-	mov [arg2_ptr], si
-
-	clc
-	jmp .done
-
-.error:
-
-	stc
-
-.done:
-
-	pop si
-	pop ax
-	ret
-
-;-------------------------- lire un fichier dans le buffer -------
-
-; DS:SI = nom du fichier, BX:DI = buffer de destination
-read_file:
-	push bx
-	push cx
-	push dx
-	push si
-	push di
-	push es
-
-	mov [read_buffer_seg], bx
-	mov [read_buffer_off], di
-	call build_fat_name
-	call find_file
-	jc read_file.error
-	jmp read_file_load
-
-; SI = entree de repertoire, BX:DI = buffer de destination
-read_file_entry:
-	push bx
-	push cx
-	push dx
-	push si
-	push di
-	push es
-
-	mov [read_buffer_seg], bx
-	mov [read_buffer_off], di
-
-read_file_load:
-	mov ax, [si + 28]
-	mov [src_size], ax
-	mov ax, [si + 26]
-	mov [free_temp], ax
-
-	mov ax, [read_buffer_off]
-	test ax, 0x01FF
-	jnz read_file.error
-	shr ax, 9
-	mov dx, 128
-	sub dx, ax
-	mov [read_max_sectors], dx
-
-	xor dx, dx
-	mov ax, [src_size]
-	mov bx, 512
-	div bx
-	test dx, dx
-	jz .sector_count_ready
-	inc ax
-
-.sector_count_ready:
-	cmp ax, [read_max_sectors]
-	ja read_file.error
-	mov [read_sectors_remaining], ax
-	mov di, [read_buffer_off]
-
-.read_loop:
-	cmp word [read_sectors_remaining], 0
-	je .done
-
-	mov ax, [free_temp]
-	cmp ax, 2
-	jb .error
-	cmp ax, 0xFF8
-	jae .error
-
-	add ax, 31
-	call lba_to_chs
-
-	push di
-	mov ax, [read_buffer_seg]
-	mov es, ax
-	mov bx, di
-	mov dl, [cs:current_drive]
-	mov ah, 0x02
-	mov al, 1
-	int 0x13
-	pop di
-	jc .error
-
-	add di, 512
-	dec word [read_sectors_remaining]
-	cmp word [read_sectors_remaining], 0
-	je .done
-
-	mov ax, [free_temp]
-	call fat_get
-	mov [free_temp], ax
-	jmp .read_loop
-
-.done:
-	xor ax, ax
-	clc
-	jmp read_file_finish
-
-.error:
-	mov ax, 0xFFFF
-	stc
-	jmp read_file_finish
-
-read_file.error:
-	mov ax, 0xFFFF
-	stc
-
-read_file_finish:
-	pop es
-	pop di
-	pop si
-	pop dx
-	pop cx
-	pop bx
-	ret
-
-;-------------------------- copier un fichier ---------------------
-
-copy_file:
-
-	push bx
-	push cx
-	push dx
-	push si
-	push di
-
-	mov word [parse_skip], 5
-	call parse_two_args
-	jc .error
-
-	mov si, [arg1_ptr]
-	call resolve_path
-	jc .error
-	mov si, [path_filename]
-	mov [arg1_ptr], si
-
-	mov bx, 0x1000
-	mov di, 0xA000
-	call read_file
-	cmp ax, 0xFFFF
-	je .error
-
-	mov ax, [saved_cluster]
-	mov [current_cluster], ax
-
-	mov si, [arg2_ptr]
-	call resolve_path
-	jc .error
-	mov si, [path_filename]
-	mov [arg2_ptr], si
-
-	call create_file
-	cmp ax, 0xFFFF
-	je .error
-
-	mov bx, [src_size]
-	call write_file
-	cmp ax, 0xFFFF
-	je .error
-
-	call write_cluster
-
-	xor ax, ax
-	jmp .done
-
-.error:
-
-	mov ax, 0xFFFF
-
-
-.done:
-
-	mov ax, [saved_cluster]
-	mov [current_cluster], ax
-
-	pop di
-	pop si
-	pop dx
-	pop cx
-	pop bx
-	ret
-
-;-------------------------- Supprimer un Fichier -----------------
-
-del_file:
-
-	push bx
-	push cx
-	push dx
-	push si
-	push di
-	push es
-
-	call build_fat_name
-
-	call find_file
-	jc .error
-
-	mov al, [si+11]
-	test al, 0x10
-	jnz .is_dir
-
-	mov al, [si + 11]
-	test al, 0x01
-	jnz .protected
-	test al, 0x04
-	jnz .protected
-
-	mov ax, [si + 26]
-
-	call free_cluster_chain
-
-	mov byte [si], 0xE5
-
-	mov ax, 0x1000
-	mov es, ax
-	mov bx, 0x8000
-	mov ch, 0
-	mov cl, 2
-	mov dh, 1
-	mov dl, [cs:current_drive]
-	mov ah, 0x03
-	mov al, 14
-	int 0x13
-	jc .error
-
-	push ax
-	xor ax, ax
-	mov dl, [cs:current_drive]
-	int 0x13
-	pop ax
-
-	xor ax, ax
-	jmp .done
-
-.is_dir:
-
-	mov ax, 0xFFFD
-	jmp .done
-
-.protected:
-
-	mov ax, 0xFFFE
-	jmp .done
-
-.error:
-
-	mov ax, 0xFFFF
-
-.done:
-
-	pop es
-	pop di
-	pop si
-	pop dx
-	pop cx
-	pop bx
-	ret
-
-;------------------------- renommer un fichier -------------------
-
-ren_file:
-
-	push bx
-	push cx
-	push dx
-	push si
-	push di
-	push es
-
-	mov word [parse_skip], 4
-	call parse_two_args
-	jc .error
-
-	mov si, [arg1_ptr]
-	call build_fat_name
-	call find_file
-	jc .error
-
-	mov al, [si + 11]
-	test al, 0x01
-	jnz .protected
-	test al, 0x04
-	jnz .protected
-
-	mov di, si
-
-	mov si, [arg2_ptr]
-	call build_fat_name
-
-	mov si, fatname
-	mov cx, 11
-
-.copy_name:
-
-	lodsb
-	stosb
-	loop .copy_name
-
-	mov ax, 0x1000
-	mov es, ax
-	mov bx, 0x8000
-	mov ch, 0
-	mov cl, 2
-	mov dh, 1
-	mov dl, [cs:current_drive]
-	mov ah, 0x03
-	mov al, 14
-	int 0x13
-	jc .error
-
-	push ax
-	xor ax, ax
-	mov dl, [cs:current_drive]
-	int 0x13
-	pop ax
-
-	xor ax, ax
-	jmp .done
-
-.protected:
-
-	mov ax, 0xFFFE
-	jmp .done
-
-.error:
-
-	mov ax, 0xFFFF
-
-.done:
-
-	pop es
-	pop di
-	pop si
-	pop dx
-	pop cx
-	pop bx
-	ret
-
-;-------------------------- Ecrire une entrée ---------------------
-
-write_dir_entry:
-
-	push ax
-	push bx
-	push cx
-	push dx
-	push si
-	push di
-	push es
-
-	mov cx, 11
-
-.copy_name:
-
-	lodsb
-	stosb
-	loop .copy_name
-
-	xor al, al
-	stosb
-
-	mov cx, 10
-
-.reserved:
-
-	xor al, al
-	stosb
-	loop .reserved
-
-	xor ax, ax
-	stosw
-	stosw
-
-	mov ax, dx
-	stosw
-
-	mov ax, bx
-	stosw
-	xor ax, ax
-	stosw
-
-	call save_current_dir
-
-	pop es
-	pop di
-	pop si
-	pop dx
-	pop cx
-	pop bx
-	pop ax
-	ret
-
-create_file:
-
-	push bx
-	push cx
-	push dx
-	push si
-	push di
-
-	call build_fat_name
-
-	call fat_find_free
-	cmp ax, 0xFFFF
-	je .error
-	mov [cluster_temp], ax
-
-	mov dx, 0xFFF
-	call fat_set
-
-	call find_free_entry
-	jc .error
-	mov di, si
-	mov si, fatname
-	mov ax, [cluster_temp]
-	mov dx, ax
-	mov bx, [src_size]
-	call write_dir_entry
-
-	mov ax, [cluster_temp]
-
-	pop di
-	pop si
-	pop dx
-	pop cx
-	pop bx
-	ret
-
-.error:
-
-	mov ax, 0xFFFF
-	pop di
-	pop si
-	pop dx
-	pop cx
-	pop bx
-	ret
-
-; ---------- Affichage ----------
-print:
-    lodsb
-    or al, al
-    jz .done
-    mov ah, 0x0E
-    int 0x10
-    jmp print
-.done:
-    ret
-
-; ---------- Exécution d'un .COM ---------
-
-do_exec:
-    push ds
-    push es
-
-    ; --- 1. Essayer de charger un .EXE d'abord ---
-    mov si, buffer
-    call build_exe_name
-    call find_file
-    jnc .found_exe
-
-    ; --- 2. Sinon, essayer de charger un .COM ---
-    mov si, buffer
-    call build_com_name
-    call find_file
+; ============================================================================
+; TYPE fichier
+; ============================================================================
+do_type:
+    mov si, [cmd_args]
+    cmp byte [si], 0
+    je .usage
+    mov al, 0
+    call file_open
     jc .not_found
-    jmp .found_com
-
-.found_exe:
-    ; Appeler la nouvelle fonction pour charger un EXE
-    call exec_exe
+.loop:
+    push es
+    push cs
     pop es
-    pop ds
-    ret
-
-.found_com:
-    ; --- 3. Ancien code pour charger un .COM ---
-    mov bx, [si + 28]
-    mov [file_size], bx
-    mov ax, [si + 26]
-    mov [free_temp], ax
-
-    mov di, 0x0100
-.read_loop_com:
-    mov ax, [free_temp]
-    cmp ax, 0xFF8
-    jae .read_done_com
-    cmp ax, 2
-    jb .read_done_com
-
-    add ax, 31
-    call lba_to_chs
-
-    push di
-    mov ax, 0x2000
-    mov es, ax
-    mov bx, di
-    mov dl, [cs:current_drive]
-    mov ah, 0x02
-    mov al, 1
-    int 0x13
-    pop di
+    mov di, XFER_BUF
+    mov ecx, 4096
+    call file_read
+    pop es
     jc .read_err
-
-    ; Reset disque
-    push ax
-    push dx
-    xor ax, ax
-    mov dl, [cs:current_drive]
-    int 0x13
-    pop dx
-    pop ax
-
-    add di, 512
-    mov ax, [free_temp]
-    call fat_get
-    mov [free_temp], ax
-    jmp .read_loop_com
-
-.read_done_com:
-    ; --- Configuration et saut pour le .COM ---
-    cli
-    mov [old_ss], ss
-    mov [old_sp], sp
-
-    mov ax, 0x2000
-    mov ss, ax
-    mov sp, 0xFFFC
-
-    push cs
-    push .ret_from_com
-
-    sti
-
-    mov ax, 0x2000
-    mov ds, ax
-    mov es, ax
-    jmp 0x2000:0x100
-
-.ret_from_com:
-    cli
-    push cs
-    pop ds
-    mov ax, [old_ss]
-    mov ss, ax
-    mov sp, [old_sp]
-    pop es
-    pop ds
-    sti
-    ret
-
-.not_found:
-    mov si, msg_unknow
-    call print
-    pop es
-    pop ds
-    ret
-
+    test eax, eax
+    jz .done
+    mov cx, ax
+    mov si, XFER_BUF
+.print:
+    lodsb
+    cmp al, 0x1A                ; fin de fichier texte
+    je .done
+    call putc
+    loop .print
+    jmp .loop
+.done:
+    call file_close
+    jmp newline
 .read_err:
-    mov si, msg_dir_err
+    call file_close
+    jmp disk_error
+.not_found:
+    mov si, msg_not_found
+    jmp print
+.usage:
+    mov si, msg_type_usage
+    jmp print
+
+; ============================================================================
+; MKFILE nom
+; ============================================================================
+do_mkfile:
+    mov si, [cmd_args]
+    cmp byte [si], 0
+    je .usage
+    xor cl, cl
+    call file_create
+    jc .error
+    call file_close
+    mov si, msg_mkfile_ok
+    jmp print
+.error:
+    mov si, msg_mkfile_err
+    jmp print
+.usage:
+    mov si, msg_mkfile_usage
+    jmp print
+
+; ============================================================================
+; COPY source destination
+; ============================================================================
+cp_src      dw 0
+cp_dst      dw 0
+cp_in       dw 0
+cp_out      dw 0
+cp_path     times 140 db 0
+cp_canon1   times 80 db 0
+cp_canon2   times 80 db 0
+
+do_copy:
+    mov si, [cmd_args]
+    cmp byte [si], 0
+    je .usage
+    mov [cp_src], si
+    call next_arg
+    jc .no_dest
+    mov [cp_dst], si
+    call terminate_arg
+    mov si, [cp_src]
+    call terminate_arg
+    jmp .open_src
+.no_dest:
+    ; "copy A:\X.TXT" : copie dans le dossier courant, meme nom
+    mov si, [cp_src]
+    call terminate_arg
+    call last_component
+    mov [cp_dst], si
+.open_src:
+
+    ; ouvrir la source
+    mov si, [cp_src]
+    mov al, 0
+    call file_open
+    jc .not_found
+    mov [cp_in], bx
+
+    ; destination = dossier ? alors on garde le nom de la source
+    mov si, [cp_dst]
+    call path_resolve
+    jc .dst_err
+    cmp byte [path_empty], 0
+    jne .into_dir
+    push ax
+    call dir_search
+    pop ax
+    jc .plain
+    test byte [si+11], ATTR_DIR
+    jz .plain
+.into_dir:
+    ; cp_path = destination + "\" + nom de la source
+    mov si, [cp_dst]
+    mov di, cp_path
+    call copy_str
+    dec di
+    mov al, [di-1]
+    cmp al, '\'
+    je .add_name
+    cmp al, ':'
+    je .add_name
+    mov byte [di], '\'
+    inc di
+.add_name:
+    mov si, [cp_src]
+    call last_component
+    call copy_str
+    mov word [cp_dst], cp_path
+.plain:
+    ; interdit : copier un fichier sur lui-meme (il serait vide)
+    mov si, [cp_src]
+    mov di, cp_canon1
+    call path_canon
+    mov si, [cp_dst]
+    mov di, cp_canon2
+    call path_canon
+    mov si, cp_canon1
+    mov di, cp_canon2
+.same:
+    lodsb
+    cmp al, [di]
+    jne .different
+    inc di
+    test al, al
+    jnz .same
+    mov bx, [cp_in]
+    call file_close
+    mov si, msg_copy_self
+    jmp print
+.different:
+    mov si, [cp_dst]
+    xor cl, cl
+    call file_create
+    jc .dst_err_close
+    mov [cp_out], bx
+
+.loop:
+    mov bx, [cp_in]
+    mov di, XFER_BUF
+    mov ecx, XFER_SIZE
+    call file_read
+    jc .io_err
+    test eax, eax
+    jz .done
+    mov ecx, eax
+    mov bx, [cp_out]
+    mov di, XFER_BUF
+    call file_write
+    jc .io_err
+    cmp eax, ecx
+    jne .io_err                 ; disque plein
+    jmp .loop
+.done:
+    mov bx, [cp_out]
+    call file_close
+    mov bx, [cp_in]
+    call file_close
+    mov si, msg_copy_ok
+    jmp print
+.io_err:
+    mov bx, [cp_out]
+    call file_close
+.dst_err_close:
+    mov bx, [cp_in]
+    call file_close
+.dst_err:
+    mov si, msg_copy_err
+    jmp print
+.not_found:
+    mov si, msg_not_found
+    jmp print
+.usage:
+    mov si, msg_copy_usage
+    jmp print
+
+; ============================================================================
+; DEL fichier
+; ============================================================================
+do_del:
+    mov si, [cmd_args]
+    cmp byte [si], 0
+    je .usage
+    ; refuser les dossiers et les fichiers systeme avec un message clair
+    call path_lookup
+    jc .error
+    test byte [si+11], ATTR_DIR
+    jnz .is_dir
+    test byte [si+11], ATTR_RO | ATTR_SYSTEM
+    jnz .protected
+    mov si, [cmd_args]
+    call file_delete
+    jc .error
+    mov si, msg_del_ok
+    jmp print
+.error:
+    mov si, msg_del_err
+    jmp print
+.is_dir:
+    mov si, msg_del_dir
+    jmp print
+.protected:
+    mov si, msg_del_protected
+    jmp print
+.usage:
+    mov si, msg_del_usage
+    jmp print
+
+; ============================================================================
+; REN ancien nouveau  (le nouveau nom reste dans le meme dossier)
+; ============================================================================
+do_ren:
+    mov si, [cmd_args]
+    mov [cp_src], si
+    call next_arg
+    jc .usage
+    mov [cp_dst], si
+    call terminate_arg
+    mov si, [cp_src]
+    call terminate_arg
+    ; protection des fichiers systeme
+    mov si, [cp_src]
+    call path_lookup
+    jc .error
+    test byte [si+11], ATTR_RO | ATTR_SYSTEM
+    jnz .protected
+    ; cp_path = dossier de l'ancien nom + nouveau nom
+    mov si, [cp_src]
+    mov di, cp_path
+    call copy_str
+    mov si, [cp_src]
+    call last_component
+    sub si, [cp_src]
+    mov di, cp_path
+    add di, si
+    mov si, [cp_dst]
+    call last_component
+    call copy_str
+    mov si, [cp_src]
+    mov di, cp_path
+    call file_rename
+    jc .error
+    mov si, msg_ren_ok
+    jmp print
+.error:
+    mov si, msg_ren_err
+    jmp print
+.protected:
+    mov si, msg_ren_protected
+    jmp print
+.usage:
+    mov si, msg_ren_usage
+    jmp print
+
+; ============================================================================
+; CD [chemin]
+; ============================================================================
+do_cd:
+    mov si, [cmd_args]
+    cmp byte [si], 0
+    je .show
+    call dir_change
+    jc .error
+    ret
+.show:
+    mov si, cd_tmp
+    mov byte [si], 0
+    mov di, cp_path
+    call path_canon
+    mov si, cp_path
     call print
+    jmp newline
+.error:
+    mov si, msg_cd_err
+    jmp print
+
+cd_tmp db 0
+
+; ============================================================================
+; MKDIR / RMDIR
+; ============================================================================
+do_mkdir:
+    mov si, [cmd_args]
+    cmp byte [si], 0
+    je .usage
+    call dir_make
+    jc .error
+    mov si, msg_mkdir_ok
+    jmp print
+.error:
+    mov si, msg_mkdir_err
+    jmp print
+.usage:
+    mov si, msg_mkdir_usage
+    jmp print
+
+do_rmdir:
+    mov si, [cmd_args]
+    cmp byte [si], 0
+    je .usage
+    call dir_remove
+    jc .error
+    mov si, msg_rmdir_ok
+    jmp print
+.error:
+    mov si, msg_rmdir_err
+    jmp print
+.usage:
+    mov si, msg_rmdir_usage
+    jmp print
+
+; ============================================================================
+; LABEL nom / VOL
+; Le nom est ecrit dans le secteur de boot ET dans l'entree "volume" de la
+; racine (c'est celle que lisent DOS et Windows).
+; ============================================================================
+lb_name times 11 db ' '
+
+do_label:
+    mov si, [cmd_args]
+    cmp byte [si], 0
+    je .usage
+    ; nom en majuscules, complete par des espaces
+    mov di, lb_name
+    mov cx, 11
+.fmt:
+    lodsb
+    call is_end
+    je .pad
+    call to_upper
+    stosb
+    loop .fmt
+    jmp .write
+.pad:
+    dec si
+    mov al, ' '
+    rep stosb
+.write:
+    mov al, [def_drive]
+    call drive_select
+    jc .err
+    ; 1) secteur de boot
+    mov bx, BOOT_BUF
+    xor eax, eax
+    call disk_read
+    jc .err
+    mov si, lb_name
+    mov di, BOOT_BUF+43
+    mov cx, 11
+    rep movsb
+    xor eax, eax
+    call disk_write
+    jc .err
+    ; 2) entree volume dans la racine (existante ou nouvelle)
+    mov di, fname
+    mov cx, 11
+    mov al, '?'
+    rep stosb
+    xor ax, ax
+    mov cl, ATTR_VOLUME
+    xor dx, dx
+    call find_entry
+    jnc .have_entry
+    xor ax, ax
+    call dir_alloc
+    jc .err
+    mov di, si
+    mov cx, 32
+    xor al, al
+    rep stosb
+    mov byte [si+11], ATTR_VOLUME
+.have_entry:
+    mov di, si
+    push si
+    mov si, lb_name
+    mov cx, 11
+    rep movsb
+    pop si
+    call dos_datetime
+    mov [si+22], ax
+    mov [si+24], dx
+    call dir_store
+    jc .err
+    mov si, msg_label_ok
+    jmp print
+.err:
+    mov si, msg_label_err
+    jmp print
+.usage:
+    mov si, msg_label_usage
+    jmp print
+
+do_vol:
+    mov al, [def_drive]
+    call drive_select
+    jc .err
+    mov si, msg_vol_name
+    call print
+    mov di, fname
+    mov cx, 11
+    mov al, '?'
+    rep stosb
+    xor ax, ax
+    mov cl, ATTR_VOLUME
+    xor dx, dx
+    call find_entry
+    jnc .print
+    ; pas d'entree volume : on lit le secteur de boot
+    mov bx, BOOT_BUF
+    xor eax, eax
+    call disk_read
+    jc .err
+    mov si, BOOT_BUF+43
+.print:
+    mov cx, 11
+.loop:
+    lodsb
+    call putc
+    loop .loop
+    jmp newline
+.err:
+    mov si, msg_vol_err
+    jmp print
+
+; ============================================================================
+; DISKCOPY source: cible:
+;   Copie une disquette secteur par secteur. Avec "diskcopy a: a:", le
+;   programme demande d'echanger les disquettes entre chaque passage.
+; ============================================================================
+dk_src      db 0
+dk_dst      db 0
+dk_next     dd 0
+dk_total    dd 0
+dk_count    dw 0
+dk_bufseg   dw 0
+dk_bufsecs  dw 0
+dk_saved_bios db 0
+
+do_diskcopy:
+    mov si, [cmd_args]
+    call parse_drive
+    jc .usage
+    mov [dk_src], al
+    call next_arg
+    jc .usage
+    call parse_drive
+    jc .usage
+    mov [dk_dst], al
+    cmp byte [dk_src], 2
+    jae .usage
+    cmp byte [dk_dst], 2
+    jae .usage
+
+    ; memoire pour le tampon : le plus grand bloc libre
+    call mem_largest
+    cmp ax, 0x20
+    jb .no_mem
+    mov bx, ax
+    and bx, 0xFFE0              ; multiple de 512 octets
+    shr ax, 5
+    mov [dk_bufsecs], ax
+    call mem_alloc
+    jc .no_mem
+    mov [dk_bufseg], ax
+
+    mov dword [dk_next], 0
+    mov al, [dk_src]
+    cmp al, [dk_dst]
+    jne .first
+    mov si, msg_dc_insert_src
+    call wait_key_msg
+.first:
+    call dc_select_src
+    jc .src_err
+    mov eax, [dv_total]
+    mov [dk_total], eax
+    mov si, msg_dc_info
+    call print
+    call print_dec32
+    mov si, msg_dc_sectors
+    call print
+
+.pass:
+    mov eax, [dk_total]
+    sub eax, [dk_next]
+    jbe .finished
+    movzx ecx, word [dk_bufsecs]
+    cmp eax, ecx
+    jbe .count_ok
+    mov eax, ecx
+.count_ok:
+    mov [dk_count], ax
+
+    ; ---- lecture depuis la source ----
+    cmp dword [dk_next], 0
+    je .read                    ; 1er passage : la source est deja la
+    mov al, [dk_src]
+    cmp al, [dk_dst]
+    jne .read
+    mov si, msg_dc_insert_src
+    call wait_key_msg
+.read:
+    call dc_select_src
+    jc .src_err
+    mov eax, [dk_next]
+    mov cx, [dk_count]
+    mov dx, [dk_bufseg]
+.read_loop:
+    mov es, dx
+    xor bx, bx
+    call disk_read
+    jc .src_err
+    inc eax
+    add dx, 0x20
+    loop .read_loop
+    push cs
     pop es
-    pop ds
+
+    ; ---- ecriture sur la cible (meme geometrie) ----
+    mov al, [dk_src]
+    cmp al, [dk_dst]
+    jne .write
+    mov si, msg_dc_insert_dst
+    call wait_key_msg
+.write:
+    mov al, [dv_bios]
+    mov [dk_saved_bios], al
+    mov al, [dk_dst]
+    mov [dv_bios], al
+    xor ax, ax
+    mov dl, [dv_bios]
+    int 0x13
+    mov eax, [dk_next]
+    mov cx, [dk_count]
+    mov dx, [dk_bufseg]
+.write_loop:
+    mov es, dx
+    xor bx, bx
+    call disk_write
+    jc .dst_err
+    inc eax
+    add dx, 0x20
+    loop .write_loop
+    push cs
+    pop es
+    mov al, [dk_saved_bios]
+    mov [dv_bios], al
+    mov al, '.'
+    call putc
+    movzx eax, word [dk_count]
+    add [dk_next], eax
+    jmp .pass
+
+.finished:
+    call newline
+    call dc_forget_dst
+    mov si, msg_dc_ok
+    call print
+    jmp .free
+.dst_err:
+    push cs
+    pop es
+    mov al, [dk_saved_bios]
+    mov [dv_bios], al
+    call dc_forget_dst
+    call newline
+    mov si, msg_dc_dst_err
+    call print
+    jmp .free
+.src_err:
+    push cs
+    pop es
+    call newline
+    mov si, msg_dc_src_err
+    call print
+.free:
+    mov es, [dk_bufseg]
+    call mem_free
+    push cs
+    pop es
+    ret
+.no_mem:
+    mov si, msg_no_mem
+    jmp print
+.usage:
+    mov si, msg_dc_usage
+    jmp print
+
+; dc_select_src : remonte la disquette source (elle a pu etre echangee)
+dc_select_src:
+    mov al, [dk_src]
+    call drive_select
+    jc .ret
+    mov byte [dv_mounted], 0
+    mov al, [dk_src]
+    call drive_select
+.ret:
     ret
 
-; --------Convertit "Hello" en "HELLO COM"------------
+; dc_forget_dst : la cible a change, il faudra relire son BPB
+dc_forget_dst:
+    push ax
+    push bx
+    mov al, [dk_dst]
+    cmp al, [cur_drive]
+    jne .table
+    mov byte [dv_mounted], 0
+    jmp .done
+.table:
+    xor ah, ah
+    mov bx, DV_SIZE
+    mul bx
+    mov bx, drive_table
+    add bx, ax
+    mov byte [bx], 0            ; dv_mounted est le 1er octet
+.done:
+    pop bx
+    pop ax
+    ret
 
-build_com_name:
+wait_key_msg:
+    call newline
+    call print
+    mov ah, 0
+    int 0x16
+    jmp newline
 
-	push si
-	push di
-	mov di, fatname
-
-	mov cx, 8
-
-.copy_name:
-
-	mov al, [si]
-	cmp al, 0
-	je .pad_name
-	cmp al, ' '
-	je .pad_name
-	cmp al, 'a'
-	jb .not_lower
-	cmp al, 'z'
-	ja .not_lower
-	sub al, 32
-
-.not_lower:
-
-	mov [di], al
-	inc di
-	inc si
-	dec cx
-	jnz .copy_name
-	jmp .add_com
-
-.pad_name:
-
-	test cx, cx
-	jz .add_com
-	mov byte [di], ' '
-	inc di
-	dec cx
-	jmp .pad_name
-
-.add_com:
-
-	mov byte [di], 'C'
-	mov byte [di+1], 'O'
-	mov byte [di+2], 'M'
-
-	pop di
-	pop si
-	ret
-
-;----------- pareil mais avec les EXE-------
-
-build_exe_name:
-
-    push si
-    push di
-    mov di, fatname
-    mov cx, 8
-.copy_name:
-
+; parse_drive : SI = "A:" -> AL = 0/1/2, SI apres. CF si invalide.
+parse_drive:
     mov al, [si]
-    cmp al, 0
-    je .pad_name
-    cmp al, ' '
-    je .pad_name
-    cmp al, 'a'
-    jb .not_lower
-    cmp al, 'z'
-    ja .not_lower
-    sub al, 32
-.not_lower:
+    call to_upper
+    cmp al, 'A'
+    jb .bad
+    cmp al, 'C'
+    ja .bad
+    cmp byte [si+1], ':'
+    jne .bad
+    sub al, 'A'
+    add si, 2
+    clc
+    ret
+.bad:
+    stc
+    ret
 
-    mov [di], al
-    inc di
-    inc si
-    dec cx
-    jnz .copy_name
-    jmp .add_exe
-.pad_name:
+; ============================================================================
+; Lancer un programme : "NOM [arguments]"
+; Cherche NOM, NOM.COM puis NOM.EXE.
+; ============================================================================
+rp_name     times 80 db 0
+rp_tail     times 130 db 0
 
-    test cx, cx
-    jz .add_exe
-    mov byte [di], ' '
-    inc di
-    dec cx
-    jmp .pad_name
-.add_exe:
+run_program:
+    ; copier le nom
+    mov di, rp_name
+    mov cx, 70
+.copy:
+    lodsb
+    call is_end
+    je .name_end
+    stosb
+    loop .copy
+.name_end:
+    mov byte [di], 0
+    dec si
+    ; queue de commande : " args" + CR, longueur en tete
+    mov di, rp_tail+1
+    xor cx, cx
+.tail:
+    lodsb
+    test al, al
+    jz .tail_end
+    cmp cx, 126
+    jae .tail_end
+    stosb
+    inc cx
+    jmp .tail
+.tail_end:
+    mov byte [di], 13
+    mov [rp_tail], cl
 
-    mov byte [di], 'E'
-    mov byte [di+1], 'X'
-    mov byte [di+2], 'E'
-    pop di
+    ; le nom a-t-il une extension ?
+    mov si, rp_name
+    call last_component
+.ext_scan:
+    lodsb
+    test al, al
+    jz .no_ext
+    cmp al, '.'
+    jne .ext_scan
+    jmp .try                    ; extension donnee
+.no_ext:
+    ; essayer .COM puis .EXE
+    mov di, rp_name
+    call str_end
+    mov [rp_ext_pos], di
+    mov si, ext_com
+    call copy_str
+    call .exists
+    jnc .run
+    mov di, [rp_ext_pos]
+    mov si, ext_exe
+    call copy_str
+    call .exists
+    jnc .run
+    mov di, [rp_ext_pos]
+    mov byte [di], 0
+    jmp .unknown
+.try:
+    call .exists
+    jc .unknown
+.run:
+    mov si, rp_name
+    mov bx, rp_tail
+    call exec_program
+    jnc .ret
+    cmp ax, ERR_NOMEM
+    je .no_mem
+    mov si, msg_mz_err
+    jmp print
+.no_mem:
+    mov si, msg_no_mem
+    jmp print
+.unknown:
+    mov si, msg_unknow
+    jmp print
+.ret:
+    ret
+
+; .exists : le fichier rp_name existe-t-il ? (CF=1 sinon)
+.exists:
+    mov si, rp_name
+    call path_lookup
+    jc .ex_no
+    test byte [si+11], ATTR_DIR | ATTR_VOLUME
+    jnz .ex_no
+    clc
+    ret
+.ex_no:
+    stc
+    ret
+
+rp_ext_pos  dw 0
+ext_com     db '.COM', 0
+ext_exe     db '.EXE', 0
+
+; ============================================================================
+; Petites fonctions utiles
+; ============================================================================
+
+; print : DS:SI = chaine terminee par 0
+print:
+    push ax
+    push si
+.loop:
+    lodsb
+    test al, al
+    jz .done
+    call putc
+    jmp .loop
+.done:
+    pop si
+    pop ax
+    ret
+
+; putc : AL = caractere (gere 10 = saut de ligne via BIOS)
+putc:
+    push ax
+    push bx
+    mov ah, 0x0E
+    mov bx, 0x0007
+    int 0x10
+    pop bx
+    pop ax
+    ret
+
+newline:
+    push si
+    mov si, msg_crlf
+    call print
     pop si
     ret
 
+disk_error:
+    mov si, msg_dir_err
+    jmp print
 
-; ---------- Lecture clavier ----------
+; print_prompt : "A:\JEUX>"
+print_prompt:
+    mov al, [cur_drive]
+    add al, 'A'
+    call putc
+    mov al, ':'
+    call putc
+    mov si, dv_cwd_path
+    cmp byte [si], 0
+    jne .path
+    mov al, '\'
+    call putc
+    jmp .end
+.path:
+    call print
+.end:
+    mov al, '>'
+    jmp putc
+
+; print_dec32 : EAX en decimal
+print_dec32:
+    push eax
+    push ebx
+    push cx
+    push edx
+    mov ebx, 10
+    xor cx, cx
+.div:
+    xor edx, edx
+    div ebx
+    push dx
+    inc cx
+    test eax, eax
+    jnz .div
+.out:
+    pop ax
+    add al, '0'
+    call putc
+    loop .out
+    pop edx
+    pop cx
+    pop ebx
+    pop eax
+    ret
+
+; print_dec32_pad : EAX en decimal, aligne a droite sur CX caracteres
+print_dec32_pad:
+    pushad
+    mov esi, eax
+    mov ebx, 10
+    xor di, di                  ; nombre de chiffres
+.count:
+    inc di
+    xor edx, edx
+    div ebx
+    test eax, eax
+    jnz .count
+.pad:
+    cmp cx, di
+    jbe .digits
+    mov al, ' '
+    call putc
+    dec cx
+    jmp .pad
+.digits:
+    mov eax, esi
+    call print_dec32
+    popad
+    ret
+
+; skip_spaces : avance SI tant qu'il y a des espaces
+skip_spaces:
+    cmp byte [si], ' '
+    jne .ret
+    inc si
+    jmp skip_spaces
+.ret:
+    ret
+
+; next_arg : SI = argument courant -> SI = argument suivant. CF s'il n'y en a pas.
+next_arg:
+.skip_word:
+    mov al, [si]
+    call is_end
+    je .spaces
+    inc si
+    jmp .skip_word
+.spaces:
+    call skip_spaces
+    cmp byte [si], 0
+    je .none
+    clc
+    ret
+.none:
+    stc
+    ret
+
+; terminate_arg : met un 0 a la fin de l'argument SI (sans bouger SI)
+terminate_arg:
+    push si
+.loop:
+    mov al, [si]
+    call is_end
+    je .end
+    inc si
+    jmp .loop
+.end:
+    mov byte [si], 0
+    pop si
+    ret
+
+; last_component : SI = chemin -> SI = debut du dernier nom
+last_component:
+    push ax
+    push di
+    mov di, si
+.loop:
+    lodsb
+    test al, al
+    jz .done
+    cmp al, '\'
+    je .mark
+    cmp al, '/'
+    je .mark
+    cmp al, ':'
+    je .mark
+    jmp .loop
+.mark:
+    mov di, si
+    jmp .loop
+.done:
+    mov si, di
+    pop di
+    pop ax
+    ret
+
+; str_end : DI = chaine -> DI = son 0 final
+str_end:
+    cmp byte [di], 0
+    je .ret
+    inc di
+    jmp str_end
+.ret:
+    ret
+
+; copy_str : DS:SI -> ES:DI (0 final compris)
+copy_str:
+    lodsb
+    stosb
+    test al, al
+    jnz copy_str
+    ret
+
+; read_line : lit une ligne au clavier dans ES:DI (255 car. max)
 read_line:
-    mov cx, 0
+    xor cx, cx
 .next:
     mov ah, 0x00
     int 0x16
@@ -2765,480 +1449,227 @@ read_line:
     je .done
     cmp al, 8
     je .backspace
+    cmp al, 32
+    jb .next
     cmp cx, 254
     jae .next
     stosb
     inc cx
-    mov ah, 0x0E
-    int 0x10
+    call putc
     jmp .next
 .backspace:
     test cx, cx
     jz .next
     dec di
     dec cx
-    mov ah, 0x0E
     mov al, 8
-    int 0x10
+    call putc
     mov al, ' '
-    int 0x10
+    call putc
     mov al, 8
-    int 0x10
+    call putc
     jmp .next
 .done:
     xor al, al
     stosb
-    mov ah, 0x0E
-    mov al, 13
-    int 0x10
-    mov al, 10
-    int 0x10
+    jmp newline
+
+; strcmp : compare la commande en SI (arret sur espace ou 0) avec DI
+; Insensible aux majuscules. CF=1 si identique.
+strcmp:
+    push bx
+    push si
+    push di
+.loop:
+    mov al, [di]
+    test al, al
+    jz .cmd_end
+    mov bl, [si]
+    cmp bl, 'A'
+    jb .compare
+    cmp bl, 'Z'
+    ja .compare
+    add bl, 0x20
+.compare:
+    cmp al, bl
+    jne .no_match
+    inc si
+    inc di
+    jmp .loop
+.cmd_end:
+    mov al, [si]
+    call is_end
+    je .match
+.no_match:
+    pop di
+    pop si
+    pop bx
+    clc
+    ret
+.match:
+    pop di
+    pop si
+    pop bx
+    stc
     ret
 
-; ---------- Comparaison de chaines ----------
-strcmp:
-
-push si
-push di
-
-.loop:
-
-	mov al, [di]
-	test al, al
-	jz .cmd_end
-	mov bl, [si]
-	cmp bl, 'A'
-	jb .compare
-	cmp bl, 'Z'
-	ja .compare
-	add bl, 0x20
-
-	.compare:
-	cmp al, bl
-	jne .no_match
-	inc si
-	inc di
-	jmp .loop
-
-.cmd_end:
-
-	mov al, [si]
-	cmp al, 0
-	je .match
-	cmp al, ' '
-	je .match
-	jmp .no_match
-
-.match:
-
-	pop di
-	pop si
-	stc
-	ret
-
-.no_match:
-
-	pop di
-	pop si
-	clc
-	ret
-
-; ----------------Handler INT 21 (API DOS)------------------------------
-int21_handler:
-
-	sti
-	push bx
-	push cx
-	push si
-	push dx
-	push di
-	push ds
-	push es
-	push bp
-
-	mov [cs:saved_user_ds], ds
-	push cs
-	pop ds
-
-	cmp ah, 0x09
-	je .ah09
-	cmp ah, 0x02
-	je .ah02
-	cmp ah, 0x06
-	je dos_ah06
-	cmp ah, 0x4C
-	je memory_ah4c
-	cmp ah, 0x30
-	je .ah30
-	cmp ah, 0x0B
-	je .ah0b
-	cmp ah, 0x01
-	je .ah01
-	cmp ah, 0x08
-	je .ah08
-	cmp ah, 0x07
-	je dos_ah07
-	cmp ah, 0x2C
-	je .ah2c
-	cmp ah, 0x00
-	je .ah00
-	cmp ah, 0x0F
-	je .ah0f
-	cmp ah, 0x25
-	je dos_ah25
-	cmp ah, 0x35
-	je .ah35
-	cmp ah, 0x3C
-	je .ah3c
-	cmp ah, 0x3D
-	je .ah3d
-	cmp ah, 0x3E
-	je .ah3e
-	cmp ah, 0x3F
-	je dos_ah3f
-	cmp ah, 0x40
-	je dos_ah40
-	cmp ah, 0x48
-	je memory_ah48
-	cmp ah, 0x49
-	je memory_ah49
-	cmp ah, 0x4A
-	je memory_ah4a
-
-	jmp .done
-
-.ah09:
-
-	mov ax, [saved_user_ds]
-	mov es, ax
-	mov si, dx
-
-.loop09:
-
-	mov al, [es:si]
-	inc si
-	cmp al, '$'
-	je .done
-	mov ah, 0x0E
-	int 0x10
-	jmp .loop09
-
-.ah02:
-
-	mov al,dl
-	mov ah, 0x0E
-	int 0x10
-	mov ah, 0x02
-	jmp .done
-
-.ah30:
-
-	mov al, 3
-	xor ah, ah
-	jmp .done
-
-.ah0b:
-
-	mov ah, 0x01
-	int 0x16
-	jz .nokey
-	mov al, 0xFF
-	jmp .done
-
-.nokey:
-
-	xor al, al
-	jmp .done
-
-.ah01:
-
-	mov ah, 0x00
-	int 0x16
-	mov ah, 0x0E
-	int 0x10
-	jmp .done
-
-.ah08:
-
-	mov ah, 0x00
-	int 0x16
-	jmp .done
-
-.ah2c:
-
-	mov ah, 0x02
-	int 0x1A
-	jmp .done
-
-.ah00:
-
-	jmp memory_ah4c
-
-.ah0f:
-
-	xor al, al
-	jmp .done
-
-.ah35:
-
-	push ds
-	mov bl, al
-	xor bh, bh
-	shl bx, 1
-	shl bx, 1
-	xor ax, ax
-	mov ds, ax
-	mov ax, [bx]
-	mov bx, [bx+2]
-	mov es, bx
-	mov bx, ax
-	pop ds
-	jmp .done
-
-.ah3c:
-
-	mov si, dx
-	call create_file
-	cmp ax, 0xFFFF
-	je .error3c
-	clc
-	jmp .done
-
-.error3c:
-
-	stc
-	jmp .done
-
-.ah3d:
-
-	mov si, dx
-	call build_fat_name
-	call find_file
-	jc .error3d
-
-	mov al, [si + 11]
-	test al, 0x10
-	jnz .error3d
-
-	call find_free_handle
-	cmp ax, 0xFFFF
-	je .error3d
-
-	push ax
-	call find_handle
-	pop ax
-	jc .error3d
-
-	mov bx, [si + 26]
-	mov [di], bx
-	mov word [di+2], si
-	mov bx, [si + 28]
-	mov [di+4], bx
-	mov byte [di+6], 1
-	mov byte [di+7], 0
-	mov dword [di+8], 0
-	mov word [di+12], 0
-	mov word [di+14], 0
-
-	clc
-	jmp .done
-
-.error3d:
-
-	mov ax, 0x0004
-	stc
-	jmp .done
-
-.ah3e:
-
-	mov ax, bx
-	call find_handle
-	jc .error3e
-	mov byte [di+6], 0
-	xor ax, ax
-	clc
-	jmp .done
-
-.error3e:
-
-	mov ax, 0x0006
-	stc
-	jmp .done
-
-.done:
-
-	pop bp
-	pop es
-	pop ds
-	pop di
-	pop dx
-	pop si
-	pop cx
-	pop bx
-	iret
-
-load_exe_source:
-	mov bx, 0x3000
-	xor di, di
-	call read_file_entry
-	ret
-
-dos_read_data_sector:
-	push ax
-	push bx
-	push cx
-	push dx
-	push es
-	add ax, 31
-	add ax, [dos_io_sector_index]
-	call lba_to_chs
-	mov ax, 0x1000
-	mov es, ax
-	mov bx, 0xA000
-	mov dl, [cs:current_drive]
-	mov ah, 0x02
-	mov al, 1
-	int 0x13
-	jc .read_error
-	pop es
-	pop dx
-	pop cx
-	pop bx
-	pop ax
-	clc
-	ret
-.read_error:
-	pop es
-	pop dx
-	pop cx
-	pop bx
-	pop ax
-	stc
-	ret
-
-dos_write_data_sector:
-	push ax
-	push bx
-	push cx
-	push dx
-	push es
-	add ax, 31
-	add ax, [dos_io_sector_index]
-	call lba_to_chs
-	mov ax, 0x1000
-	mov es, ax
-	mov bx, 0xA000
-	mov dl, [cs:current_drive]
-	mov ah, 0x03
-	mov al, 1
-	int 0x13
-	jc .write_error
-	pop es
-	pop dx
-	pop cx
-	pop bx
-	pop ax
-	clc
-	ret
-.write_error:
-	pop es
-	pop dx
-	pop cx
-	pop bx
-	pop ax
-	stc
-	ret
-
-dos_advance_data_cluster:
-	mov ax, [dos_io_cluster]
-	call fat_get
-	cmp ax, 2
-	jb .invalid
-	cmp ax, 0x0FF8
-	jae .invalid
-	mov [dos_io_cluster], ax
-	mov word [dos_io_sector_index], 0
-	clc
-	ret
-.invalid:
-	stc
-	ret
-
-dos_update_file_size:
-	mov di, [dos_io_handle]
-	mov ax, [dos_io_count]
-	mov [di+4], ax
-	mov si, [di+2]
-	call save_current_dir
-	clc
-	ret
-
-; ---------- Donnees ----------
-msg_welcome  db 'MicroDOS v1.1.0 Classic Edition - Shell', 13, 10
+; ============================================================================
+; Vecteurs d'interruption
+; ============================================================================
+install_vectors:
+    push es
+    xor ax, ax
+    mov es, ax
+    cli
+    mov word [es:0x20*4], int20_handler
+    mov [es:0x20*4+2], cs
+    mov word [es:0x21*4], int21_handler
+    mov [es:0x21*4+2], cs
+    mov word [es:0x22*4], int22_default
+    mov [es:0x22*4+2], cs
+    mov word [es:0x23*4], int23_default
+    mov [es:0x23*4+2], cs
+    mov word [es:0x24*4], int24_default
+    mov [es:0x24*4+2], cs
+    mov word [es:0x27*4], int27_handler
+    mov [es:0x27*4+2], cs
+    mov word [es:0x28*4], iret_stub
+    mov [es:0x28*4+2], cs
+    mov word [es:0x29*4], int29_handler
+    mov [es:0x29*4+2], cs
+    ; multiplex (XMS, DPMI, Windows...) et EMS : "rien d'installe".
+    ; Un simple IRET laisse AX inchange, ce qui veut dire "absent".
+    mov word [es:0x2F*4], iret_stub
+    mov [es:0x2F*4+2], cs
+    mov word [es:0x67*4], iret_stub
+    mov [es:0x67*4+2], cs
+    sti
+    pop es
+    ret
+
+iret_stub:
+int22_default:
+    iret
+
+; Ctrl-C : on ignore
+int23_default:
+    clc
+    iret
+
+; erreur critique : "echouer" (AL=3)
+int24_default:
+    mov al, 3
+    iret
+
+; INT 29h : sortie rapide d'un caractere
+int29_handler:
+    push ax
+    push bx
+    mov ah, 0x0E
+    mov bx, 0x0007
+    int 0x10
+    pop bx
+    pop ax
+    iret
+
+%include "fs.inc"
+%include "file.inc"
+%include "mem.inc"
+%include "exec.inc"
+%include "dos.inc"
+%ifdef DISK_EDITION
+%include "disk_edition.inc"
+%endif
+
+; ============================================================================
+; Donnees
+; ============================================================================
+boot_drive   db 0
+
+msg_welcome  db 'MicroDOS ', VERSION_STR, ' ', EDITION_STR, ' - Shell', 13, 10
              db 'tapez "help" pour la liste de commandes.', 13, 10, 10, 0
-msg_prompt   db '>', 0
 msg_help     db 'Liste des Commandes', 13, 10
-             db ' help - cette aide', 13, 10
-             db ' dir - liste les fichiers', 13, 10
-             db ' type - affiche un fichier', 13, 10
-             db ' <programme> - execute un fichier .COM', 13, 10
-             db ' reset - reinitialise la disquette', 13, 10
-             db ' cls - efface l ecran', 13, 10
-             db ' ver - version', 13, 10
-             db ' reboot - redemarre le PC', 13, 10
-             db ' rebootdos - redemarre MicroDOS', 13, 10
-             db ' echo <txt> - affiche un texte', 13, 10
-             db ' pause - attend une touche', 13, 10
-             db ' date - affiche la date', 13, 10
-             db ' time - affiche l heure', 13, 10
-	     db ' mkfile <nom> - cree un fichier', 13, 10
-	     db ' copy <src> <dst> - copie un fichier', 13, 10
-	     db ' del - Supprime un fichier', 13, 10
-	     db ' ren <ANCIEN NOM> <NOUVEAU NOM> - renomme un fichier', 13, 10
-             db ' cd - Change de Repectoire', 13, 10
-             db ' mkdir <nom> - cree un dossier', 13, 10
-             db ' rmdir <nom> - Suprimme un dossier', 13, 10
-			 db ' label <nom> - Renomme une disquette', 13, 10
-			 db ' vol - Affiche le nom du volume', 13, 10, 0
+             db ' help             - cette aide', 13, 10
+             db ' dir [chemin]     - liste les fichiers', 13, 10
+             db ' type <fichier>   - affiche un fichier', 13, 10
+             db ' <programme>      - execute un .COM ou un .EXE', 13, 10
+             db ' a: b: c:         - change de lecteur', 13, 10
+             db ' cd [dossier]     - change de repertoire', 13, 10
+             db ' mkdir / rmdir    - cree / supprime un dossier', 13, 10
+             db ' copy <src> <dst> - copie un fichier', 13, 10
+             db ' del <fichier>    - supprime un fichier', 13, 10
+             db ' ren <anc> <nouv> - renomme un fichier', 13, 10
+             db ' mkfile <nom>     - cree un fichier vide', 13, 10
+             db ' diskcopy a: b:   - copie une disquette entiere', 13, 10
+             db ' label <nom>      - renomme la disquette', 13, 10
+             db ' vol              - affiche le nom du volume', 13, 10
+             db ' fatinfo / mem    - espace disque / memoire libre', 13, 10
+             db ' reset            - relit la disquette', 13, 10
+%ifdef DISK_EDITION
+             db ' fdisk            - partitionne le disque dur', 13, 10
+             db ' format c:        - formate le disque dur', 13, 10
+             db ' setup            - installe MicroDOS sur le disque dur', 13, 10
+%endif
+             db ' echo pause cls ver date time reboot rebootdos', 13, 10, 0
 msg_unknow   db 'Commande inconnue. Tapez "help".', 13, 10, 0
-msg_ver      db 'MicroDOS v1.1.0 Classic Edition', 13, 10, 0
+msg_ver      db 'MicroDOS ', VERSION_STR, ' ', EDITION_STR, 13, 10, 0
 msg_reboot   db 'Redemarrage en cours...', 13, 10, 0
 msg_rebootdos db 'Redemarrage de MicroDOS...', 13, 10, 0
 msg_dir_err  db 'Erreur lecture disque.', 13, 10, 0
 msg_not_found db 'Fichier non trouve.', 13, 10, 0
-msg_reset db 'Disque reinitialise', 13, 10, 0
-msg_pause db 'Appuyez sur une touche...', 13, 10, 0
-msg_date_prefix db 'Date :', 0
-msg_time_prefix db 'Heure :', 0
-msg_fatinfo db 'Cluster libre : ', 0
+msg_reset    db 'Disque reinitialise', 13, 10, 0
+msg_pause    db 'Appuyez sur une touche...', 13, 10, 0
+msg_date_prefix db 'Date : ', 0
+msg_time_prefix db 'Heure : ', 0
+msg_fatinfo  db 'Clusters libres : ', 0
+msg_bytes_free db ' octets libres', 0
+msg_bytes    db ' octets', 13, 10, 0
+msg_mem      db 'Memoire conventionnelle libre : ', 0
+msg_dir_sp   db '   ', 0
+msg_dir_files db ' fichier(s) ', 0
+msg_dir_dirs db ' dossier(s) ', 0
+msg_dir_tag  db '     <DIR>', 0
+msg_crlf     db 13, 10, 0
+msg_type_usage db 'Usage : type FICHIER.TXT', 13, 10, 0
 msg_mkfile_ok db 'Fichier cree', 13, 10, 0
 msg_mkfile_err db 'Erreur creation', 13, 10, 0
 msg_mkfile_usage db 'Usage : mkfile NOM.TXT', 13, 10, 0
-msg_copy_ok db 'Fichier copie.', 13, 10, 0
+msg_copy_ok  db 'Fichier copie.', 13, 10, 0
 msg_copy_err db 'Erreur de copie', 13, 10, 0
-msg_del_ok db 'Fichier supprime.', 13, 10, 0
-msg_del_err db 'Erreur de Suppression', 13, 10, 0
+msg_copy_self db 'Impossible de copier un fichier sur lui-meme.', 13, 10, 0
+msg_copy_usage db 'Usage : copy SOURCE DESTINATION', 13, 10, 0
+msg_del_ok   db 'Fichier supprime.', 13, 10, 0
+msg_del_err  db 'Erreur de Suppression', 13, 10, 0
 msg_del_protected db 'Suppression refusee : fichier systeme.',  13, 10, 0
-msg_del_dir db 'Impossible de suprimer un repertoire.', 13, 10, 0
+msg_del_dir  db 'Impossible de suprimer un repertoire.', 13, 10, 0
 msg_del_usage db 'Usage : del NOM.TXT', 13, 10, 0
-msg_ren_ok db 'Fichier renomme.', 13, 10, 0
-msg_ren_err db 'Erreur renomage.', 13, 10, 0
-msg_ren_usage db 'Usage : <ANCIEN NOM> <NOUVEAU NOM>', 13, 10, 0
+msg_ren_ok   db 'Fichier renomme.', 13, 10, 0
+msg_ren_err  db 'Erreur renomage.', 13, 10, 0
+msg_ren_usage db 'Usage : ren <ANCIEN NOM> <NOUVEAU NOM>', 13, 10, 0
 msg_ren_protected db 'Impossible de Renommer : fichier systeme.', 13, 10, 0
-msg_cd_err db 'Repertoire Introuvable', 13, 10, 0
-msg_mkdir_ok db 'Repertoire', 13, 10, 0
+msg_cd_err   db 'Repertoire Introuvable', 13, 10, 0
+msg_mkdir_ok db 'Repertoire cree.', 13, 10, 0
 msg_mkdir_err db 'Erreur lors de la creation du dossier', 13, 10, 0
 msg_mkdir_usage db 'Usage : mkdir <NOM DU DOSSIER>', 13, 10, 0
 msg_rmdir_ok db 'Dossier suprime.', 13, 10, 0
-msg_rmdir_err db 'Erreur de suppression', 13, 10, 0
-msg_rmdir_usage db 'rmdir <NOM DU DOSSIER>', 13, 10, 0
-msg_dir_tag db ' <DIR>', 0
-msg_label_ok db 'Disquette renomme avec succes', 13, 10, 0
+msg_rmdir_err db 'Erreur de suppression (le dossier doit etre vide)', 13, 10, 0
+msg_rmdir_usage db 'Usage : rmdir <NOM DU DOSSIER>', 13, 10, 0
+msg_label_ok db 'Disquette renommee avec succes', 13, 10, 0
 msg_label_usage db 'Usage : label <NOM>', 13, 10, 0
-msg_label_err db 'Erreur de renomage', 0
+msg_label_err db 'Erreur de renommage', 13, 10, 0
 msg_vol_name db 'Le nom du volume est : ', 0
-msg_vol_err db 'Impossible de lire le nom du volume', 0
+msg_vol_err  db 'Impossible de lire le nom du volume', 13, 10, 0
 msg_drive_err db 'Lecteur pas pret.', 13, 10, 0
+msg_mz_err   db 'Erreur chargement du programme.', 13, 10, 0
+msg_no_mem   db 'Pas assez de memoire.', 13, 10, 0
+msg_dc_usage db 'Usage : diskcopy A: B:  (ou A: A: avec un seul lecteur)', 13, 10, 0
+msg_dc_info  db 'Copie de ', 0
+msg_dc_sectors db ' secteurs', 13, 10, 0
+msg_dc_insert_src db 'Inserez la disquette SOURCE puis appuyez sur une touche', 0
+msg_dc_insert_dst db 'Inserez la disquette CIBLE puis appuyez sur une touche', 0
+msg_dc_ok    db 'Copie de la disquette terminee.', 13, 10, 0
+msg_dc_src_err db 'Erreur de lecture de la disquette source.', 13, 10, 0
+msg_dc_dst_err db 'Erreur d ecriture sur la disquette cible.', 13, 10, 0
 
 cmd_help     db 'help', 0
 cmd_dir      db 'dir', 0
@@ -3247,49 +1678,36 @@ cmd_cls      db 'cls', 0
 cmd_ver      db 'ver', 0
 cmd_reboot   db 'reboot', 0
 cmd_rebootdos db 'rebootdos', 0
-cmd_reset db 'reset', 0
-cmd_echo db 'echo', 0
-cmd_pause db 'pause', 0
-cmd_date db  'date', 0
-cmd_time db 'time', 0
-cmd_fatinfo db 'fatinfo', 0
-cmd_mkfile db 'mkfile', 0
-cmd_copy db 'copy', 0
-cmd_del db 'del', 0
-cmd_ren db 'ren', 0
-cmd_cd db 'cd', 0
-cmd_mkdir db 'mkdir', 0
-cmd_rmdir db 'rmdir', 0
-cmd_label db 'label', 0
-cmd_vol db 'vol', 0
-cmd_drive_a db 'a:', 0
-cmd_drive_b db 'b:', 0
+cmd_reset    db 'reset', 0
+cmd_echo     db 'echo', 0
+cmd_pause    db 'pause', 0
+cmd_date     db 'date', 0
+cmd_time     db 'time', 0
+cmd_fatinfo  db 'fatinfo', 0
+cmd_mkfile   db 'mkfile', 0
+cmd_copy     db 'copy', 0
+cmd_del      db 'del', 0
+cmd_erase    db 'erase', 0
+cmd_ren      db 'ren', 0
+cmd_cd       db 'cd', 0
+cmd_chdir    db 'chdir', 0
+cmd_mkdir    db 'mkdir', 0
+cmd_md       db 'md', 0
+cmd_rmdir    db 'rmdir', 0
+cmd_rd       db 'rd', 0
+cmd_label    db 'label', 0
+cmd_vol      db 'vol', 0
+cmd_mem      db 'mem', 0
+cmd_diskcopy db 'diskcopy', 0
+cmd_drive_a  db 'a:', 0
+cmd_drive_b  db 'b:', 0
+cmd_drive_c  db 'c:', 0
+cmd_fdisk    db 'fdisk', 0
+cmd_format   db 'format', 0
+cmd_setup    db 'setup', 0
 
-fatname      times 11 db 0
-file_size    dw 0
-cluster_temp dw 0
-arg1_ptr dw 0
-arg2_ptr dw 0
-src_size dw 0
-parse_skip dw 5
-free_temp dw 0
-current_cluster dw 0
-current_drive db 0
-saved_user_ds dw 0
-read_buffer_seg dw 0
-read_buffer_off dw 0
-read_max_sectors dw 0
-read_sectors_remaining dw 0
-
-temp_name times 64 db 0
-open_files times 5*16 db 0
-dir_entry_addr dw 0
-saved_cluster dw 0
-path_filename dw 0
-current_path times 64 db 0
-init_path db 'A:\', 0
 buffer       times 256 db 0
 
-%include "int21_ext.inc"
-%include "memory.inc"
-%include "exec_exe.inc"
+kernel_end:
+; Le noyau doit tenir sous les tampons (KERNEL_MAX) : sinon erreur ici
+times -(($ - $$) > KERNEL_MAX) db 0
